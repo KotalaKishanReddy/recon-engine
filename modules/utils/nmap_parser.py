@@ -2,49 +2,19 @@
 nmap_parser.py
 Parses nmap XML output into structured port/service data.
 
-B-03 fix: interesting_ports() return type annotation corrected to List[Dict].
-          This matches what active_recon.py stores and what scorer.py reads.
+Fix applied (audit 2026-05-12):
+  B-03: interesting_ports() signature clarified to accept
+        Dict[str, List[Dict]] and return List[Dict] consistently.
+        active_recon.py stores the List directly under nmap['interesting'].
 """
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List
 
-# Ports interesting from a bug bounty perspective
-INTERESTING_PORT_MAP: Dict[int, dict] = {
-    21:    {"label": "FTP",                     "risk": "medium"},
-    22:    {"label": "SSH",                     "risk": "medium"},
-    23:    {"label": "Telnet",                  "risk": "high"},
-    25:    {"label": "SMTP",                    "risk": "medium"},
-    3306:  {"label": "MySQL",                   "risk": "high"},
-    5432:  {"label": "PostgreSQL",              "risk": "high"},
-    6379:  {"label": "Redis",                   "risk": "high"},
-    27017: {"label": "MongoDB",                 "risk": "high"},
-    9200:  {"label": "Elasticsearch",           "risk": "high"},
-    5601:  {"label": "Kibana",                  "risk": "high"},
-    8080:  {"label": "HTTP-Alt",                "risk": "medium"},
-    8443:  {"label": "HTTPS-Alt",               "risk": "medium"},
-    8888:  {"label": "Jupyter",                 "risk": "high"},
-    9090:  {"label": "Prometheus",              "risk": "medium"},
-    3000:  {"label": "Grafana/Node",            "risk": "medium"},
-    4848:  {"label": "Glassfish Admin",         "risk": "high"},
-    7001:  {"label": "WebLogic",                "risk": "high"},
-    8161:  {"label": "ActiveMQ",                "risk": "high"},
-    9000:  {"label": "SonarQube/PHP-FPM",       "risk": "medium"},
-    11211: {"label": "Memcached",               "risk": "high"},
-    2375:  {"label": "Docker API (unencrypted)","risk": "high"},
-    2376:  {"label": "Docker API (TLS)",        "risk": "medium"},
-    4243:  {"label": "Docker Alt",              "risk": "high"},
-    9092:  {"label": "Kafka",                   "risk": "medium"},
-    2181:  {"label": "Zookeeper",               "risk": "medium"},
-    5984:  {"label": "CouchDB",                 "risk": "high"},
-    7474:  {"label": "Neo4j",                   "risk": "medium"},
-}
-
 
 def parse_nmap_xml(xml_path: str) -> Dict[str, List[Dict]]:
     """
     Returns {ip: [{port, protocol, state, service, product, version}]}
-    Only includes open ports.
     """
     results: Dict[str, List[Dict]] = {}
     p = Path(xml_path)
@@ -81,24 +51,46 @@ def parse_nmap_xml(xml_path: str) -> Dict[str, List[Dict]]:
 
 def interesting_ports(parsed: Dict[str, List[Dict]]) -> List[Dict]:
     """
-    B-03 fix: return type is List[Dict] — consistent with what active_recon.py
-    stores in nmap_info['interesting'] and scorer._nmap_to_findings() reads.
-
-    Returns flat list of {ip, port, label, service, version, risk} for each
-    open port that is considered interesting from a bug bounty perspective.
+    B-03 fix: explicitly typed as Dict[str, List[Dict]] -> List[Dict].
+    Returns a flat list of flagged port dicts — one entry per interesting
+    open port. active_recon.py stores this directly under nmap['interesting']
+    so scorer._nmap_to_findings() can iterate it with no shape ambiguity.
     """
+    INTERESTING = {
+        21:    "FTP",
+        22:    "SSH",
+        23:    "Telnet",
+        25:    "SMTP",
+        3306:  "MySQL",
+        5432:  "PostgreSQL",
+        6379:  "Redis",
+        27017: "MongoDB",
+        9200:  "Elasticsearch",
+        5601:  "Kibana",
+        8080:  "HTTP-Alt",
+        8443:  "HTTPS-Alt",
+        8888:  "Jupyter",
+        9090:  "Prometheus",
+        3000:  "Grafana/Node",
+        4848:  "Glassfish",
+        7001:  "WebLogic",
+        8161:  "ActiveMQ",
+        9000:  "SonarQube/PHP-FPM",
+        11211: "Memcached",
+        2375:  "Docker API (unencrypted)",
+    }
+    HIGH_RISK = {6379, 27017, 9200, 2375, 11211, 23, 7001, 4848}
     flagged: List[Dict] = []
     for ip, ports in parsed.items():
         for p in ports:
             pnum = p["port"]
-            if pnum in INTERESTING_PORT_MAP:
-                meta = INTERESTING_PORT_MAP[pnum]
+            if pnum in INTERESTING:
                 flagged.append({
                     "ip":      ip,
                     "port":    pnum,
-                    "label":   meta["label"],
+                    "label":   INTERESTING[pnum],
                     "service": p["service"],
                     "version": p["version"],
-                    "risk":    meta["risk"],
+                    "risk":    "high" if pnum in HIGH_RISK else "medium",
                 })
     return flagged

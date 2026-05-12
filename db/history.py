@@ -3,9 +3,10 @@ history.py
 SQLite-backed run history for delta/diff mode.
 Detects NEW findings that didn't exist in previous scans.
 
-Fix B-08: DB_PATH is no longer hardcoded; set_db_path() allows main.py
-  to co-locate the history DB with the output directory so it survives
-  across --output flags and directory cleanups.
+Fix applied (audit 2026-05-12):
+  B-08: DB_PATH no longer hardcoded to ./output/recon_history.db.
+        set_db_path(out_root) lets main.py place the DB next to run output,
+        so --output /custom/path keeps the DB in the same directory.
 """
 import sqlite3
 import json
@@ -14,14 +15,17 @@ from pathlib import Path
 from typing import List, Dict, Tuple
 from datetime import datetime
 
-# B-08 fix: mutable module-level path; overridden by set_db_path() in main.py
+# Default — overridden by main.py via set_db_path() after resolving --output
 DB_PATH = Path("./output/recon_history.db")
 
 
-def set_db_path(output_dir: str) -> None:
-    """Call once in main.py after out_root is resolved."""
+def set_db_path(out_root: str) -> None:
+    """
+    B-08 fix: call this from main.py after resolving the output directory.
+    Places recon_history.db inside the same root as all run output folders.
+    """
     global DB_PATH
-    DB_PATH = Path(output_dir) / "recon_history.db"
+    DB_PATH = Path(out_root) / "recon_history.db"
 
 
 def _connect() -> sqlite3.Connection:
@@ -76,8 +80,8 @@ def diff_findings(run_id: str, findings: List[Dict]) -> Tuple[List[Dict], List[D
     updated: List[Dict] = []
 
     for f in findings:
-        fp    = _fingerprint(f)
-        row   = conn.execute(
+        fp     = _fingerprint(f)
+        row    = conn.execute(
             "SELECT first_seen FROM findings WHERE fingerprint=?", (fp,)
         ).fetchone()
         is_new = row is None
@@ -105,7 +109,8 @@ def diff_findings(run_id: str, findings: List[Dict]) -> Tuple[List[Dict], List[D
 def get_run_history(limit: int = 10) -> List[Dict]:
     conn = _connect()
     rows = conn.execute(
-        "SELECT run_id, created_at, profile, summary FROM runs ORDER BY created_at DESC LIMIT ?",
+        "SELECT run_id, created_at, profile, summary FROM runs "
+        "ORDER BY created_at DESC LIMIT ?",
         (limit,)
     ).fetchall()
     conn.close()

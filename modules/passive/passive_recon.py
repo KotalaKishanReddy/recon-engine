@@ -3,8 +3,9 @@ passive_recon.py
 Runs all passive recon tools against a list of apex domains.
 No active connections to targets — zero noise, zero legal risk.
 
-Fix B-05: asyncio.Semaphore bounds domain concurrency (default 5)
-to prevent DNS rate-limiting from simultaneous blasts.
+Fix applied (audit 2026-05-12):
+  B-05: asyncio.Semaphore bounds concurrency so we don't fire all domains
+        simultaneously and hammer DNS resolvers into rate-limiting us.
 """
 import asyncio
 import json
@@ -111,10 +112,8 @@ async def passive_recon_domain(domain: str, out_dir: Path, config: dict) -> Dict
     print(f"  [passive] {domain}: {len(subdomains)} subdomains, {len(emails)} emails")
 
     output = {
-        "domain":     domain,
-        "subdomains": subdomains,
-        "emails":     emails,
-        "sources":    {
+        "domain": domain, "subdomains": subdomains, "emails": emails,
+        "sources": {
             "subfinder": len(subfinder_subs),
             "amass":     len(amass_subs),
             "crtsh":     len(crtsh_subs),
@@ -125,10 +124,10 @@ async def passive_recon_domain(domain: str, out_dir: Path, config: dict) -> Dict
 
 
 async def run_passive(domains: List[str], out_dir: Path, config: dict) -> Dict[str, Any]:
-    # B-05 fix: bound concurrency to prevent DNS rate-limiting
+    # B-05 fix: bound concurrency so we don't fire all domains simultaneously
+    # and get DNS rate-limited. Default 5, configurable in config.yaml.
     concurrency = config.get("passive_concurrency", 5)
     sem = asyncio.Semaphore(concurrency)
-    print(f"  [passive] Running {len(domains)} domain(s) with concurrency={concurrency}")
 
     async def bounded(domain: str):
         async with sem:
@@ -138,7 +137,6 @@ async def run_passive(domains: List[str], out_dir: Path, config: dict) -> Dict[s
     final: Dict[str, Any] = {}
     for domain, result in zip(domains, results):
         if isinstance(result, Exception):
-            print(f"  [passive] ERROR on {domain}: {result}")
             final[domain] = {"domain": domain, "error": str(result), "subdomains": [], "emails": []}
         else:
             final[domain] = result

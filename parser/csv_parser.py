@@ -1,8 +1,6 @@
 """
 csv_parser.py
 Parses HackerOne / Bugcrowd scope CSV exports into normalized target objects.
-
-Fix B-01: Added parse_scope_csv() wrapper expected by main.py.
 """
 import csv
 import re
@@ -126,14 +124,13 @@ def parse_csv(filepath: Union[str, Path]) -> List[Target]:
 
 def parse_scope_csv(filepath: Union[str, Path]) -> dict:
     """
-    B-01 fix: Wrapper function expected by main.py.
-    Accepts str or Path, returns:
-      {"domains": [apex_domain, ...], "targets": [target_dict, ...], "skipped": [target_dict, ...]}
-    Only web-testable targets (non-android/ios) are included in 'domains'.
+    B-01 fix: wrapper called by main.py.
+    Accepts str or Path, returns {"domains": [...], "targets": [...], "skipped": [...]}
+    so main.py can do targets.get("domains", []) safely.
     """
     targets = parse_csv(filepath)
-    domains = sorted({t.apex_domain for t in targets
-                      if not t.skip and t.apex_domain and t.eligible_for_bounty})
+    # Deduplicated apex domains for in-scope web targets only
+    domains = sorted({t.apex_domain for t in targets if not t.skip and t.apex_domain})
     skipped = [t.to_dict() for t in targets if t.skip]
     print_summary(targets)
     return {
@@ -167,4 +164,4 @@ if __name__ == "__main__":
         print("Usage: python csv_parser.py <scope.csv>")
         sys.exit(1)
     result = parse_scope_csv(sys.argv[1])
-    print(f"Domains ready for recon: {result['domains']}")
+    print(f"Domains: {result['domains']}")

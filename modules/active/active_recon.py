@@ -2,10 +2,9 @@
 active_recon.py
 Probes live hosts: httpx, nmap, wafw00f, gowitness screenshots.
 
-Fixes applied:
-  B-03 (prev audit): nmap XML parsed; parsed_hosts + interesting stored.
-  B-10: wafw00f now writes to temp file instead of -o - stdout JSON
-        to fix silent parse failures on older wafw00f versions.
+Fixes applied (audit 2026-05-12):
+  B-03: nmap XML parsed after scan; interesting ports stored in active_results.
+  B-10: wafw00f writes to temp file instead of -o - stdout (not universally supported).
 """
 import asyncio
 import json
@@ -72,8 +71,8 @@ async def nmap_scan(hosts: List[str], out_dir: Path, top_ports: int = 1000, flag
 
 
 async def wafw00f_check(live_urls: List[str], out_dir: Path) -> Dict[str, str]:
-    """B-10 fix: write to temp file instead of -o - to support all wafw00f versions."""
-    results = {}
+    # B-10 fix: write to temp file instead of -o - (stdout JSON not universally supported)
+    results: Dict[str, str] = {}
     for url in live_urls[:30]:
         tmp_fd, tmp_path = tempfile.mkstemp(suffix=".json")
         os.close(tmp_fd)
@@ -114,9 +113,9 @@ async def run_active(passive_results: Dict, out_dir: Path, config: dict, profile
     active_dir = out_dir / "active"
     active_dir.mkdir(exist_ok=True)
 
-    all_subdomains = []
+    all_subdomains: List[str] = []
     for domain, data in passive_results.items():
-        subs = data.get("subdomains", [])
+        subs = list(data.get("subdomains", []))
         if domain not in subs:
             subs = [domain] + subs
         all_subdomains.extend(subs)
@@ -125,7 +124,8 @@ async def run_active(passive_results: Dict, out_dir: Path, config: dict, profile
     httpx_results = await httpx_probe(all_subdomains, active_dir, rate=profile.get("rate_limit", 150))
     live_urls  = [h.get("url", "") for h in httpx_results if h.get("url")]
     live_hosts = [
-        h.get("host", h.get("url", "").replace("https://", "").replace("http://", "").split("/")[0])
+        h.get("host",
+              h.get("url", "").replace("https://", "").replace("http://", "").split("/")[0])
         for h in httpx_results
     ]
 
@@ -142,15 +142,15 @@ async def run_active(passive_results: Dict, out_dir: Path, config: dict, profile
 
     nmap_info = await nmap_task
 
-    # B-03 fix (prev audit): parse nmap XML so interesting ports reach the scorer
-    nmap_parsed      = {}
-    nmap_interesting = []
+    # B-03 fix: parse nmap XML so interesting ports reach scorer and reporter
+    nmap_parsed: Dict      = {}
+    nmap_interesting: List = []
     xml_path = nmap_info.get("xml_file", "")
     if xml_path:
         try:
             from modules.utils.nmap_parser import parse_nmap_xml, interesting_ports
             nmap_parsed      = parse_nmap_xml(xml_path)
-            nmap_interesting = interesting_ports(nmap_parsed)   # List[Dict]
+            nmap_interesting = interesting_ports(nmap_parsed)  # returns List[Dict]
             print(f"  [nmap-parser] {len(nmap_interesting)} interesting port(s) across "
                   f"{len(nmap_parsed)} host(s)")
         except Exception as e:
@@ -159,12 +159,12 @@ async def run_active(passive_results: Dict, out_dir: Path, config: dict, profile
     nmap_info["parsed_hosts"] = nmap_parsed
     nmap_info["interesting"]  = nmap_interesting   # always List[Dict]
 
-    results = {
+    results: Dict[str, Any] = {
         "total_subdomains_probed": len(all_subdomains),
-        "live_hosts":     httpx_results,
-        "live_count":     len(httpx_results),
-        "waf_detection":  waf_results,
-        "nmap":           nmap_info,
+        "live_hosts":    httpx_results,
+        "live_count":    len(httpx_results),
+        "waf_detection": waf_results,
+        "nmap":          nmap_info,
         "screenshots_dir": ss_dir,
     }
     (active_dir / "active_results.json").write_text(json.dumps(results, indent=2, default=str))
