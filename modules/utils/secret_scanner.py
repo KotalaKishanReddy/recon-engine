@@ -1,11 +1,12 @@
 """
 secret_scanner.py
-Scans HTTP response bodies and JS files for leaked secrets.
+Scans HTTP response bodies and JS files for leaked secrets:
+API keys, tokens, passwords, private keys.
 
-Fix B-07: scan_js_files() now parses live HTML for real <script src> URLs
-          instead of trying 5 hardcoded paths. Hashed filenames (main.abc123.js)
-          are discovered automatically. Hardcoded paths used only as fallback.
-          content-type check broadened to accept text/javascript AND application/javascript.
+B-07 fix: scan_js_files() now parses <script src> from live HTML first
+          so hashed filenames (main.abc123.js) are discovered automatically.
+          Falls back to hardcoded paths only if no scripts found in HTML.
+          Content-type check broadened to accept text/* as well.
 """
 import re
 import asyncio
@@ -38,12 +39,11 @@ SECRET_PATTERNS: List[tuple] = [
 
 COMPILED = [(label, re.compile(pattern)) for label, pattern in SECRET_PATTERNS]
 
-_JS_FALLBACK_PATHS = [
+_SCRIPT_SRC_RE = re.compile(r'<script[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+_FALLBACK_JS_PATHS = [
     "/app.js", "/main.js", "/bundle.js",
     "/static/js/main.chunk.js", "/assets/index.js",
 ]
-_SCRIPT_SRC_RE = re.compile(r'<script[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
-_JS_CONTENT_TYPES = ("javascript", "ecmascript", "text/plain")
 
 
 def scan_text(text: str, source_url: str = "") -> List[Dict]:
@@ -54,87 +54,64 @@ def scan_text(text: str, source_url: str = "") -> List[Dict]:
             findings.append({
                 "type":   label,
                 "match":  snippet,
-                "file":   source_url,
                 "source": source_url,
+                "file":   source_url,
                 "line":   text[:match.start()].count("\n") + 1,
             })
     return findings
 
 
-def _is_js_content_type(ct: str) -> bool:
-    ct_lower = ct.lower()
-    return any(t in ct_lower for t in _JS_CONTENT_TYPES)
+async def _fetch_text(session: aiohttp.ClientSession, url: str) -> str:
+    """Fetch URL text, return empty string on any error."""
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10), ssl=False) as resp:
+            ct = resp.headers.get("content-type", "")
+            if resp.status == 200 and ("javascript" in ct or "text" in ct or ct == ""):
+                return await resp.text(errors="ignore")
+    except Exception:
+        pass
+    return ""
 
 
-def _resolve_url(src: str, base_url: str) -> str:
-    """Resolve a <script src> value to an absolute URL."""
-    if src.startswith("http://") or src.startswith("https://"):
-        return src
-    if src.startswith("//"):
-        scheme = base_url.split(":")[0]
-        return f"{scheme}:{src}"
-    base = base_url.rstrip("/")
-    return base + "/" + src.lstrip("/")
-
-
-async def scan_js_files(
-    live_hosts: List[Dict],
-    session: aiohttp.ClientSession,
-    per_host_timeout: int = 10,
-) -> List[Dict]:
+async def scan_js_files(live_hosts: List[Dict], session: aiohttp.ClientSession) -> List[Dict]:
     """
     B-07 fix:
-    1. Fetch live host HTML and extract real <script src> URLs (catches hashed filenames).
-    2. Fetch and scan each discovered JS file for secrets.
-    3. Fall back to hardcoded paths only when HTML fetch fails or yields no scripts.
+    1. Fetch HTML for each live host and extract real <script src> URLs.
+       This discovers hashed filenames (main.abc123.js) that hardcoded paths miss.
+    2. Fall back to hardcoded paths only if no <script src> found in HTML.
+    3. Fetch and scan up to 10 JS files per host.
     """
     all_secrets: List[Dict] = []
 
-    for host in live_hosts[:20]:
-        url = host.get("url", "")
+    for host in live_hosts[:20]:  # cap to avoid huge runtimes
+        url = host.get("url", "").rstrip("/")
         if not url:
             continue
 
-        # Step 1 — discover real JS URLs from page HTML
+        # Step 1: fetch HTML, parse <script src> tags
         js_urls: List[str] = []
-        try:
-            async with session.get(
-                url, timeout=aiohttp.ClientTimeout(total=per_host_timeout), ssl=False
-            ) as resp:
-                if resp.status == 200:
-                    html = await resp.text(errors="ignore")
-                    for src in _SCRIPT_SRC_RE.findall(html):
-                        js_urls.append(_resolve_url(src, url))
-        except Exception:
-            pass
+        html = await _fetch_text(session, url)
+        if html:
+            for src in _SCRIPT_SRC_RE.findall(html):
+                # Skip inline data URIs
+                if src.startswith("data:"):
+                    continue
+                full = src if src.startswith("http") else url + "/" + src.lstrip("/")
+                js_urls.append(full)
 
-        # Step 2 — fallback to hardcoded paths when discovery fails
+        # Step 2: fallback to hardcoded paths if HTML yielded nothing
         if not js_urls:
-            js_urls = [url.rstrip("/") + p for p in _JS_FALLBACK_PATHS]
+            js_urls = [url + p for p in _FALLBACK_JS_PATHS]
 
-        # Deduplicate, cap at 10 JS files per host
-        seen: set = set()
-        unique_js: List[str] = []
-        for u in js_urls:
-            if u not in seen:
-                seen.add(u)
-                unique_js.append(u)
-        unique_js = unique_js[:10]
-
-        # Step 3 — fetch each JS file and scan
-        for js_url in unique_js:
-            try:
-                async with session.get(
-                    js_url, timeout=aiohttp.ClientTimeout(total=per_host_timeout), ssl=False
-                ) as resp:
-                    ct = resp.headers.get("content-type", "")
-                    if resp.status == 200 and _is_js_content_type(ct):
-                        body = await resp.text(errors="ignore")
-                        hits = scan_text(body, js_url)
-                        all_secrets.extend(hits)
-            except Exception:
-                pass
+        # Step 3: fetch and scan each JS file (cap at 10 per host)
+        for js_url in js_urls[:10]:
+            body = await _fetch_text(session, js_url)
+            if body:
+                hits = scan_text(body, js_url)
+                all_secrets.extend(hits)
 
     if all_secrets:
-        print(f"  [secret_scanner] {len(all_secrets)} potential secret(s) found in JS files")
+        print(f"  [secret_scanner] {len(all_secrets)} potential secret(s) found")
+    else:
+        print(f"  [secret_scanner] no secrets found in JS files")
     return all_secrets
