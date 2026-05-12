@@ -1,0 +1,9 @@
+Asset Type,Asset Identifier,Eligible for Submission,Eligible for Bounty,Instructions,Max Severity,CVSS Score,CWE
+URL,https://www.example.com,true,true,,critical,,
+URL,https://api.example.com,true,true,,critical,,
+WILDCARD,*.example.com,true,true,,high,,
+URL,https://admin.example.com,true,true,,critical,,
+URL,https://staging.example.com,true,false,,medium,,
+URL,https://dev-portal.example.com,true,true,,high,,
+WILDCARD,*.beta.example.com,true,true,,high,,
+URL,https://assets.cdn.example.com,false,false,,low,,

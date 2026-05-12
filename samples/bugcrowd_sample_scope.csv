@@ -1,0 +1,6 @@
+Type,Target,In Scope,Bounty Eligible,Description
+website,https://www.example.com,true,true,Main web app
+website,https://api.example.com,true,true,REST API
+website,https://admin.example.com,true,true,Admin panel
+website,https://staging.example.com,true,false,Staging environment
+wildcard,*.example.com,true,true,All subdomains
