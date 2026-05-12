@@ -1,0 +1,27 @@
+version: "3.9"
+
+services:
+  recon-engine:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: recon-engine:latest
+    container_name: recon-engine
+    volumes:
+      - ../output:/app/output
+      - ../config.yaml:/app/config.yaml
+    environment:
+      - SHODAN_API_KEY=${SHODAN_API_KEY:-}
+      - SECURITYTRAILS_KEY=${SECURITYTRAILS_KEY:-}
+    stdin_open: true
+    tty: true
+    # Usage:
+    # docker compose run recon-engine --csv /app/output/scope.csv --profile deep
+
+  nuclei:
+    image: projectdiscovery/nuclei:latest
+    container_name: nuclei-standalone
+    volumes:
+      - ../output:/output
+    entrypoint: ["nuclei"]
+    profiles: ["nuclei-only"]
