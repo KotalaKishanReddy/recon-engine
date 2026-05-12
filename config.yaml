@@ -1,0 +1,67 @@
+# ReconEngine Configuration
+
+tools:
+  subfinder: subfinder
+  amass: amass
+  httpx: httpx
+  nmap: nmap
+  nuclei: nuclei
+  ffuf: ffuf
+  gowitness: gowitness
+  wafw00f: wafw00f
+  whatweb: whatweb
+  paramspider: paramspider
+
+api_keys:
+  shodan: ""
+  securitytrails: ""
+  virustotal: ""
+  chaos: ""
+
+profiles:
+  fast:
+    passive: true
+    active: true
+    vuln: false
+    screenshots: false
+    threads: 20
+    rate_limit: 150
+  deep:
+    passive: true
+    active: true
+    vuln: true
+    screenshots: true
+    threads: 10
+    rate_limit: 50
+  stealth:
+    passive: true
+    active: false
+    vuln: false
+    screenshots: false
+    threads: 5
+    rate_limit: 10
+
+default_profile: fast
+output_dir: ./output
+
+nuclei_tags:
+  - exposure
+  - misconfig
+  - takeover
+  - cve
+  - default-logins
+  - panel
+
+nmap_top_ports: 1000
+nmap_flags: "-sV -sC --open"
+
+scoring:
+  nuclei_critical: 100
+  nuclei_high: 80
+  nuclei_medium: 50
+  nuclei_low: 20
+  open_admin_panel: 70
+  subdomain_takeover: 90
+  exposed_git: 85
+  many_open_ports: 40
+  juicy_params: 35

@@ -1,0 +1,10 @@
+aiohttp>=3.9.0
+pyyaml>=6.0
+theHarvester>=4.6.0
+paramspider>=2.0
+wafw00f>=2.2.0
+python-nmap>=0.7.1
+jinja2>=3.1.0
+requests>=2.31.0
+dnspython>=2.4.0
+colorama>=0.4.6
