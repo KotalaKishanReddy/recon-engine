@@ -1,4 +1,4 @@
-# Scan output (contains sensitive findings — never commit)
+# Scan output (contains sensitive findings)
 output/
 
 # Python

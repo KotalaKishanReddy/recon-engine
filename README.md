@@ -66,7 +66,7 @@ Every scan produces:
 
 ## API Keys (optional but recommended)
 
-Add to `config.yaml`:
+Add to `config.yaml` for wider passive coverage:
 - [Shodan](https://shodan.io)
 - [SecurityTrails](https://securitytrails.com)
 - [Chaos (ProjectDiscovery)](https://chaos.projectdiscovery.io)

@@ -30,39 +30,35 @@ from reporter.reporter             import generate_report
 
 BANNER = """
   ____                        _____             _
- |  _ \ ___  ___ ___  _ __  | ____|_ __   __ _(_)_ __   ___
- | |_) / _ \/ __/ _ \| '_ \ |  _| | '_ \ / _` | | '_ \ / _ \\
+ |  _ \\  ___  ___ ___  _ __  | ____|_ __   __ _(_)_ __   ___
+ | |_) |/ _ \\/ __/ _ \\| '_ \\ |  _| | '_ \\ / _` | | '_ \\ / _ \\
  |  _ <  __/ (_| (_) | | | || |___| | | | (_| | | | | |  __/
- |_| \_\___|\___|\___/|_| |_||_____|_| |_|\__, |_|_| |_|\___|
-                                           |___/
+ |_| \\_\\___|\\___\\___/|_| |_||_____|_| |_|\\__, |_|_| |_|\\___|
+                                              |___/
   Bug Bounty Recon Automation — For authorized use only.
 """
 
 
-def load_config(path: str = "config.yaml") -> dict:
-    cfg_path = Path(path)
-    if not cfg_path.exists():
-        print(f"[!] config.yaml not found. Using defaults.")
+def load_config(path="config.yaml"):
+    cfg = Path(path)
+    if not cfg.exists():
+        print(f"[!] {path} not found. Using defaults.")
         return {}
-    with open(cfg_path) as f:
+    with open(cfg) as f:
         return yaml.safe_load(f) or {}
 
 
-def check_tools(config: dict) -> dict:
+def check_tools(config):
     tools = config.get("tools", {})
-    status = {}
     for name, binary in tools.items():
         found = shutil.which(binary) is not None
-        status[name] = found
-        mark = "OK" if found else "MISSING"
-        print(f"  [{mark}] {name:<15} ({binary})")
-    return status
+        print(f"  [{'OK' if found else 'MISSING'}] {name:<15} ({binary})")
 
 
-def get_profile(config: dict, profile_name: str) -> dict:
+def get_profile(config, name):
     profiles = config.get("profiles", {})
     default  = config.get("default_profile", "fast")
-    return profiles.get(profile_name, profiles.get(default, {
+    return profiles.get(name, profiles.get(default, {
         "passive": True, "active": True, "vuln": False,
         "screenshots": False, "threads": 20, "rate_limit": 150,
     }))
@@ -74,85 +70,66 @@ async def run_pipeline(args, config):
     profile_name = args.profile or config.get("default_profile", "fast")
     profile      = get_profile(config, profile_name)
 
-    print(f"[*] Run ID    : {run_id}")
-    print(f"[*] CSV       : {args.csv}")
-    print(f"[*] Profile   : {profile_name}")
+    print(f"[*] Run ID  : {run_id}")
+    print(f"[*] CSV     : {args.csv}")
+    print(f"[*] Profile : {profile_name}")
 
-    base_out = Path(config.get("output_dir", "./output"))
-    out_dir  = base_out / run_id
+    out_dir = Path(config.get("output_dir", "./output")) / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[*] Output    : {out_dir}\n")
+    print(f"[*] Output  : {out_dir}\n")
 
     print("[*] Tool availability:")
     check_tools(config)
     print()
 
-    # Step 1 — Parse CSV
-    print("=" * 55)
-    print("  STEP 1: Parsing scope CSV")
-    print("=" * 55)
+    # ── Step 1: Parse ────────────────────────────────────────
+    print("=" * 50 + "\n  STEP 1: Parsing scope CSV\n" + "=" * 50)
     targets     = parse_csv(args.csv)
     print_summary(targets)
     web_targets = [t for t in targets if not t.skip and t.eligible_for_bounty]
     if not web_targets:
-        print("[!] No web targets found. Exiting.")
-        return
+        print("[!] No web targets found. Exiting."); return
     apex_domains = list(dict.fromkeys(t.apex_domain for t in web_targets))
     print(f"[*] Apex domains: {apex_domains}\n")
     (out_dir / "scope.json").write_text(json.dumps([t.to_dict() for t in web_targets], indent=2))
 
-    # Step 2 — Passive
-    print("=" * 55)
-    print("  STEP 2: Passive Reconnaissance")
-    print("=" * 55)
+    # ── Step 2: Passive ──────────────────────────────────────
+    print("=" * 50 + "\n  STEP 2: Passive Reconnaissance\n" + "=" * 50)
     if profile.get("passive", True):
         passive_results = await run_passive(apex_domains, out_dir, config)
-        total_subs = sum(len(d.get("subdomains", [])) for d in passive_results.values())
-        print(f"\n  Passive done. Subdomains found: {total_subs}\n")
+        total = sum(len(d.get("subdomains", [])) for d in passive_results.values())
+        print(f"\n  Done. Subdomains found: {total}\n")
     else:
-        print("  Passive skipped.\n")
         passive_results = {d: {"domain": d, "subdomains": [d], "emails": []} for d in apex_domains}
+        print("  Skipped.\n")
 
-    # Step 3 — Active
-    print("=" * 55)
-    print("  STEP 3: Active Reconnaissance")
-    print("=" * 55)
+    # ── Step 3: Active ───────────────────────────────────────
+    print("=" * 50 + "\n  STEP 3: Active Reconnaissance\n" + "=" * 50)
     if profile.get("active", True):
         active_results = await run_active(passive_results, out_dir, config, profile)
-        print(f"\n  Active done. Live hosts: {active_results.get('live_count', 0)}\n")
+        print(f"\n  Done. Live hosts: {active_results.get('live_count', 0)}\n")
     else:
-        print("  Active skipped.\n")
         active_results = {"live_hosts": [], "live_count": 0, "waf_detection": {}, "nmap": {}}
+        print("  Skipped.\n")
 
-    # Step 4 — Vuln
-    print("=" * 55)
-    print("  STEP 4: Vulnerability Scanning")
-    print("=" * 55)
+    # ── Step 4: Vuln ─────────────────────────────────────────
+    print("=" * 50 + "\n  STEP 4: Vulnerability Scanning\n" + "=" * 50)
     if profile.get("vuln", False):
         vuln_results = await run_vuln(active_results, passive_results, out_dir, config)
-        print(f"\n  Vuln done. Nuclei findings: {vuln_results.get('nuclei_count', 0)}\n")
+        print(f"\n  Done. Nuclei findings: {vuln_results.get('nuclei_count', 0)}\n")
     else:
-        print("  Vuln scan skipped (use --profile deep).\n")
         vuln_results = {"nuclei_findings": [], "nuclei_count": 0, "param_urls": {}, "gf_patterns": {}}
+        print("  Skipped (use --profile deep to enable).\n")
 
-    # Step 5 — Score
-    print("=" * 55)
-    print("  STEP 5: Scoring & Aggregation")
-    print("=" * 55)
+    # ── Step 5: Score ────────────────────────────────────────
+    print("=" * 50 + "\n  STEP 5: Scoring & Aggregation\n" + "=" * 50)
     aggregated = score_and_aggregate(passive_results, active_results, vuln_results, config, out_dir)
 
-    # Step 6 — Report
-    print()
-    print("=" * 55)
-    print("  STEP 6: Generating HTML Report")
-    print("=" * 55)
+    # ── Step 6: Report ───────────────────────────────────────
+    print("\n" + "=" * 50 + "\n  STEP 6: Generating Report\n" + "=" * 50)
     report_path = generate_report(aggregated, passive_results, active_results, run_id, profile_name, out_dir)
 
-    # Summary
-    print()
-    print("=" * 55)
-    print("  SCAN COMPLETE")
-    print("=" * 55)
+    print("\n" + "=" * 50 + "\n  SCAN COMPLETE\n" + "=" * 50)
     by_sev = aggregated.get("by_severity", {})
     print(f"  Critical : {by_sev.get('critical', 0)}")
     print(f"  High     : {by_sev.get('high', 0)}")
@@ -164,18 +141,16 @@ async def run_pipeline(args, config):
         key=lambda x: -x[1].get("interest_score", 0)
     ):
         print(f"    {sig.get('priority', '')} -- {domain}")
-    print()
 
 
 def main():
-    p = argparse.ArgumentParser(description="ReconEngine — Automated Bug Bounty Recon Pipeline")
-    p.add_argument("--csv",     required=True,         help="HackerOne/Bugcrowd scope CSV path")
+    p = argparse.ArgumentParser(description="ReconEngine -- Automated Bug Bounty Recon Pipeline")
+    p.add_argument("--csv",     required=True)
     p.add_argument("--profile", default=None,          help="fast | deep | stealth")
-    p.add_argument("--run-id",  default=None,          help="Custom run ID (default: timestamp)")
-    p.add_argument("--config",  default="config.yaml", help="Config file path")
+    p.add_argument("--run-id",  default=None)
+    p.add_argument("--config",  default="config.yaml")
     args = p.parse_args()
-    config = load_config(args.config)
-    asyncio.run(run_pipeline(args, config))
+    asyncio.run(run_pipeline(args, load_config(args.config)))
 
 
 if __name__ == "__main__":
