@@ -2,10 +2,10 @@
 active_recon.py
 Probes live hosts: httpx, nmap, wafw00f, gowitness screenshots.
 
-B-03 fix: nmap XML parsed; interesting_ports() returns List[Dict] consistently.
-B-10 fix: wafw00f now writes to a temp file (not -o -) to avoid stdout JSON
-          incompatibility in older wafw00f versions.
-Prev: nmap XML parsed and stored in nmap_info.
+Fixes applied:
+  B-03: nmap XML parsed via nmap_parser; results stored in active_results.
+  B-10: wafw00f writes to a temp file instead of -o - stdout to fix
+        silent JSON failures across wafw00f versions.
 """
 import asyncio
 import json
@@ -64,30 +64,22 @@ async def nmap_scan(hosts: List[str], out_dir: Path, top_ports: int = 1000, flag
     hosts_file = out_dir / "nmap_input.txt"
     hosts_file.write_text("\n".join(hosts[:50]))
     out_xml = out_dir / "nmap_output.xml"
-    cmd = [
-        "nmap", "-iL", str(hosts_file),
-        "--top-ports", str(top_ports),
-        "-oX", str(out_xml),
-        "--open", "-T4",
-    ] + flags.split()
+    cmd = ["nmap", "-iL", str(hosts_file), "--top-ports", str(top_ports),
+           "-oX", str(out_xml), "--open", "-T4"] + flags.split()
     await run_tool(cmd, timeout=600)
     print(f"  [nmap] scan complete -> {out_xml}")
     return {"xml_file": str(out_xml), "hosts_scanned": len(hosts[:50])}
 
 
+# B-10 FIX: write wafw00f output to a temp file — not all versions support -o -
 async def wafw00f_check(live_urls: List[str], out_dir: Path) -> Dict[str, str]:
-    """
-    B-10 fix: write output to a temp file instead of stdout (-o -).
-    Some wafw00f versions do not support -o - for stdout JSON,
-    causing json.loads() to fail and all WAF results to be stored as 'Unknown'.
-    """
     results: Dict[str, str] = {}
     for url in live_urls[:30]:
         tmp_fd, tmp_path = tempfile.mkstemp(suffix=".json")
         os.close(tmp_fd)
         try:
             await run_tool(["wafw00f", url, "-o", tmp_path, "-f", "json"], timeout=30)
-            raw = Path(tmp_path).read_text().strip()
+            raw = Path(tmp_path).read_text(errors="ignore").strip()
             if raw:
                 data = json.loads(raw)
                 results[url] = data[0].get("firewall", "None") if isinstance(data, list) and data else "None"
@@ -122,7 +114,7 @@ async def run_active(passive_results: Dict, out_dir: Path, config: dict, profile
     active_dir = out_dir / "active"
     active_dir.mkdir(exist_ok=True)
 
-    all_subdomains: List[str] = []
+    all_subdomains = []
     for domain, data in passive_results.items():
         subs = data.get("subdomains", [])
         if domain not in subs:
@@ -130,24 +122,18 @@ async def run_active(passive_results: Dict, out_dir: Path, config: dict, profile
         all_subdomains.extend(subs)
     all_subdomains = list(dict.fromkeys(all_subdomains))
 
-    httpx_results = await httpx_probe(
-        all_subdomains, active_dir, rate=profile.get("rate_limit", 150)
-    )
+    httpx_results = await httpx_probe(all_subdomains, active_dir, rate=profile.get("rate_limit", 150))
     live_urls  = [h.get("url", "") for h in httpx_results if h.get("url")]
     live_hosts = [
-        h.get("host",
-              h.get("url", "").replace("https://", "").replace("http://", "").split("/")[0])
+        h.get("host", h.get("url", "").replace("https://", "").replace("http://", "").split("/")[0])
         for h in httpx_results
     ]
 
     nmap_task = asyncio.create_task(
-        nmap_scan(
-            live_hosts, active_dir,
-            top_ports=config.get("nmap_top_ports", 1000),
-            flags=config.get("nmap_flags", "-sV -sC --open"),
-        )
+        nmap_scan(live_hosts, active_dir,
+                  top_ports=config.get("nmap_top_ports", 1000),
+                  flags=config.get("nmap_flags", "-sV -sC --open"))
     )
-    # B-10 fix: wafw00f uses temp file output
     waf_results = await wafw00f_check(live_urls, active_dir)
 
     ss_dir = ""
@@ -156,30 +142,29 @@ async def run_active(passive_results: Dict, out_dir: Path, config: dict, profile
 
     nmap_info = await nmap_task
 
-    # Parse nmap XML → structured interesting ports
+    # B-03 FIX: parse nmap XML so interesting ports reach the scorer
     nmap_parsed      = {}
-    nmap_interesting: List[Dict] = []
+    nmap_interesting = []
     xml_path = nmap_info.get("xml_file", "")
     if xml_path:
         try:
             from modules.utils.nmap_parser import parse_nmap_xml, interesting_ports
             nmap_parsed      = parse_nmap_xml(xml_path)
-            nmap_interesting = interesting_ports(nmap_parsed)  # List[Dict] — B-03 fix
+            nmap_interesting = interesting_ports(nmap_parsed)   # always List[Dict]
             print(f"  [nmap-parser] {len(nmap_interesting)} interesting port(s) across "
                   f"{len(nmap_parsed)} host(s)")
         except Exception as e:
             print(f"  [nmap-parser] skipped — {e}")
-
     nmap_info["parsed_hosts"] = nmap_parsed
-    nmap_info["interesting"]  = nmap_interesting  # always List[Dict]
+    nmap_info["interesting"]  = nmap_interesting   # List[Dict] — consistent shape
 
     results = {
         "total_subdomains_probed": len(all_subdomains),
-        "live_hosts":              httpx_results,
-        "live_count":              len(httpx_results),
-        "waf_detection":           waf_results,
-        "nmap":                    nmap_info,
-        "screenshots_dir":         ss_dir,
+        "live_hosts":    httpx_results,
+        "live_count":    len(httpx_results),
+        "waf_detection": waf_results,
+        "nmap":          nmap_info,
+        "screenshots_dir": ss_dir,
     }
     (active_dir / "active_results.json").write_text(json.dumps(results, indent=2, default=str))
     return results

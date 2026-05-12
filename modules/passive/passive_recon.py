@@ -3,8 +3,9 @@ passive_recon.py
 Runs all passive recon tools against a list of apex domains.
 No active connections to targets — zero noise, zero legal risk.
 
-B-05 fix: asyncio.Semaphore bounds concurrent domain scans (default 5)
-          to prevent DNS rate-limiting when scope has many domains.
+Fix applied (B-05): asyncio.Semaphore bounds domain concurrency so
+DNS resolvers / external APIs are not hammered by all domains at once.
+Default: 5 concurrent domains (config: passive_concurrency).
 """
 import asyncio
 import json
@@ -111,26 +112,16 @@ async def passive_recon_domain(domain: str, out_dir: Path, config: dict) -> Dict
     print(f"  [passive] {domain}: {len(subdomains)} subdomains, {len(emails)} emails")
 
     output = {
-        "domain":     domain,
-        "subdomains": subdomains,
-        "emails":     emails,
-        "sources":    {
-            "subfinder": len(subfinder_subs),
-            "amass":     len(amass_subs),
-            "crtsh":     len(crtsh_subs),
-        },
+        "domain": domain, "subdomains": subdomains, "emails": emails,
+        "sources": {"subfinder": len(subfinder_subs), "amass": len(amass_subs), "crtsh": len(crtsh_subs)},
     }
     (domain_dir / "passive_results.json").write_text(json.dumps(output, indent=2))
     return output
 
 
 async def run_passive(domains: List[str], out_dir: Path, config: dict) -> Dict[str, Any]:
-    """
-    B-05 fix: use asyncio.Semaphore to cap concurrent domain scans.
-    Default is 5; override with config key 'passive_concurrency'.
-    Without this, all domains fire simultaneously → DNS rate-limits,
-    subfinder/amass return empty results for most domains.
-    """
+    # B-05 FIX: bound concurrency — don't fire all domains simultaneously.
+    # DNS rate-limits and external APIs block if too many run at once.
     concurrency = config.get("passive_concurrency", 5)
     sem = asyncio.Semaphore(concurrency)
 

@@ -1,8 +1,6 @@
 """
 csv_parser.py
 Parses HackerOne / Bugcrowd scope CSV exports into normalized target objects.
-
-B-01 fix: added parse_scope_csv() wrapper that main.py actually imports.
 """
 import csv
 import re
@@ -142,20 +140,26 @@ def print_summary(targets: List[Target]):
     print(f"{'─'*50}\n")
 
 
+# ── B-01 FIX: parse_scope_csv() wrapper — called by main.py ──────────────────
 def parse_scope_csv(filepath) -> dict:
     """
-    B-01 fix: wrapper called by main.py.
-    Accepts str or Path, returns {"domains": [...], "targets": [...], "skipped": [...]}.
-    'domains' is a deduplicated sorted list of apex domains for web targets only.
+    Public API consumed by main.py.
+    Accepts str or Path.  Returns:
+      {
+        "domains": [<unique apex domains for web targets>],
+        "targets": [<all Target dicts>],
+        "skipped": [<skipped Target dicts>],
+      }
     """
     targets = parse_csv(str(filepath))
     print_summary(targets)
-    domains = sorted({t.apex_domain for t in targets if not t.skip and t.apex_domain})
+    web     = [t for t in targets if not t.skip]
+    domains = sorted({t.apex_domain for t in web if t.apex_domain})
     skipped = [t.to_dict() for t in targets if t.skip]
     return {
-        "domains":  domains,
-        "targets":  [t.to_dict() for t in targets],
-        "skipped":  skipped,
+        "domains": domains,
+        "targets": [t.to_dict() for t in web],
+        "skipped": skipped,
     }
 
 
@@ -164,5 +168,5 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python csv_parser.py <scope.csv>")
         sys.exit(1)
-    result = parse_scope_csv(sys.argv[1])
-    print(f"Domains: {result['domains']}")
+    tgts = parse_csv(sys.argv[1])
+    print_summary(tgts)
