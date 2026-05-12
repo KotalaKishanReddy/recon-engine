@@ -2,6 +2,10 @@
 scorer.py
 Aggregates all recon results, deduplicates findings,
 assigns priority scores, and produces a unified findings list.
+
+Fixes applied (audit 2026-05-12):
+  - Bug 1: _ffuf_to_findings() added; ffuf hits now scored + surfaced
+  - Bug 2: _secrets_to_findings() added; secret_hits now scored + surfaced
 """
 import json
 import re
@@ -18,6 +22,27 @@ JUICY_KEYWORDS = [
     ".git", ".env", "wp-admin", "jira", "confluence", "jenkins",
     "kibana", "grafana", "elastic", "mongo", "redis", "console",
 ]
+
+# ffuf paths that warrant automatic HIGH severity
+_HIGH_FFUF_PATHS = {".git", ".env", "backup", ".bak", "id_rsa", "config.php"}
+_MED_FFUF_PATHS  = {"admin", "administrator", "dashboard", "console", "panel",
+                    "debug", "actuator", "server-status", "phpinfo.php"}
+
+# Secret type → severity mapping
+_SECRET_SEVERITY = {
+    "AWS Access Key":    ("critical", 100),
+    "Private Key":       ("critical", 100),
+    "Stripe Live Key":   ("critical", 95),
+    "GitHub Token":      ("critical", 95),
+    "Slack Token":       ("high",     80),
+    "Twilio Auth Token": ("high",     80),
+    "SendGrid Key":      ("high",     80),
+    "Google API Key":    ("high",     75),
+    "JWT Token":         ("medium",   55),
+    "Bearer Token":      ("medium",   55),
+    "DB Connection String": ("high",  85),
+}
+_SECRET_DEFAULT = ("high", 75)
 
 
 @dataclass
@@ -117,6 +142,56 @@ def _gf_to_findings(gf_patterns: Dict[str, List[str]], weights: Dict) -> List[Fi
     return findings
 
 
+def _ffuf_to_findings(ffuf_hits: List[Dict], weights: Dict) -> List[Finding]:
+    """Bug 1 fix: convert ffuf directory hits into scored Finding objects."""
+    findings = []
+    for i, h in enumerate(ffuf_hits):
+        url    = h.get("url", "")
+        status = h.get("status", 0)
+        path   = url.rstrip("/").split("/")[-1].lower()
+
+        if any(p in path for p in _HIGH_FFUF_PATHS):
+            sev, score = "high", weights.get("exposed_git", 85)
+        elif any(p in path for p in _MED_FFUF_PATHS):
+            sev, score = "medium", 60
+        elif status in (401, 403):
+            # Forbidden but exists — still interesting
+            sev, score = "low", 30
+        else:
+            sev, score = "low", 20
+
+        findings.append(Finding(
+            id=f"ffuf_{i}", category="ffuf", severity=sev, score=score,
+            host=re.sub(r"https?://([^/]+).*", r"\1", url),
+            url=url,
+            title=f"Exposed path: {path or url}",
+            description=f"ffuf hit — HTTP {status}, path: {path}",
+            tags=["exposure", "ffuf"],
+            raw=h,
+        ))
+    return findings
+
+
+def _secrets_to_findings(secret_hits: List[Dict], weights: Dict) -> List[Finding]:
+    """Bug 2 fix: convert secret scanner hits into scored Finding objects."""
+    findings = []
+    for i, s in enumerate(secret_hits):
+        stype = s.get("type", "Unknown Secret")
+        sev, score = _SECRET_SEVERITY.get(stype, _SECRET_DEFAULT)
+        host  = re.sub(r"https?://([^/]+).*", r"\1", s.get("file", ""))
+        findings.append(Finding(
+            id=f"secret_{i}", category="secret", severity=sev, score=score,
+            host=host,
+            url=s.get("file", ""),
+            title=f"Secret Exposed: {stype}",
+            description=f"Secret type '{stype}' found in {s.get('file', 'unknown file')}. "
+                        f"Snippet (redacted): {s.get('snippet', '')[:60]}",
+            tags=["secret", "exposure", "critical-lead"],
+            raw=s,
+        ))
+    return findings
+
+
 def deduplicate(findings: List[Finding]) -> List[Finding]:
     seen, unique = set(), []
     for f in findings:
@@ -130,9 +205,15 @@ def deduplicate(findings: List[Finding]) -> List[Finding]:
 def score_and_aggregate(passive_results, active_results, vuln_results, config, out_dir: Path) -> Dict[str, Any]:
     weights      = config.get("scoring", {})
     all_findings: List[Finding] = []
+
     all_findings.extend(_nuclei_to_findings(vuln_results.get("nuclei_findings", []), weights))
     all_findings.extend(_httpx_to_findings(active_results.get("live_hosts", []), weights))
     all_findings.extend(_gf_to_findings(vuln_results.get("gf_patterns", {}), weights))
+    # Bug 1 fix: ffuf hits now scored
+    all_findings.extend(_ffuf_to_findings(vuln_results.get("ffuf_hits", []), weights))
+    # Bug 2 fix: secret hits now scored
+    all_findings.extend(_secrets_to_findings(vuln_results.get("secret_hits", []), weights))
+
     all_findings = deduplicate(all_findings)
     all_findings.sort(key=lambda f: (-f.score, -SEVERITY_ORDER.get(f.severity, 0)))
 
@@ -143,8 +224,8 @@ def score_and_aggregate(passive_results, active_results, vuln_results, config, o
     live_hosts = active_results.get("live_hosts", [])
     domain_signals = {}
     for domain, data in passive_results.items():
-        sub_count      = len(data.get("subdomains", []))
-        domain_score   = min(sub_count // 5, 30)
+        sub_count       = len(data.get("subdomains", []))
+        domain_score    = min(sub_count // 5, 30)
         domain_findings = [f for f in all_findings if domain in f.host]
         for f in domain_findings:
             domain_score += f.score // 10
@@ -166,9 +247,9 @@ def score_and_aggregate(passive_results, active_results, vuln_results, config, o
 
     output = {
         "total_findings": len(all_findings),
-        "by_severity": by_severity,
+        "by_severity":    by_severity,
         "domain_signals": domain_signals,
-        "findings": [f.to_dict() for f in all_findings],
+        "findings":       [f.to_dict() for f in all_findings],
     }
     out_path = out_dir / "aggregated_results.json"
     out_path.write_text(json.dumps(output, indent=2, default=str))

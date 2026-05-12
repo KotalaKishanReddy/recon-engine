@@ -1,6 +1,10 @@
 """
 active_recon.py
 Probes live hosts: httpx, nmap, wafw00f, gowitness screenshots.
+
+Fix applied (audit 2026-05-12):
+  - Bug 3: nmap XML is now parsed via nmap_parser after scan completes;
+    parsed hosts and interesting ports stored in active_results.
 """
 import asyncio
 import json
@@ -123,12 +127,31 @@ async def run_active(passive_results: Dict, out_dir: Path, config: dict, profile
         ss_dir = await gowitness_screenshots(live_urls, active_dir)
 
     nmap_info = await nmap_task
+
+    # ── Bug 3 fix: parse nmap XML so interesting ports reach the scorer ────────
+    nmap_parsed     = {}
+    nmap_interesting = {}
+    xml_path = nmap_info.get("xml_file", "")
+    if xml_path:
+        try:
+            from modules.utils.nmap_parser import parse_nmap_xml, interesting_ports
+            nmap_parsed      = parse_nmap_xml(xml_path)
+            nmap_interesting = interesting_ports(nmap_parsed)
+            interesting_count = sum(len(v) for v in nmap_interesting.values())
+            print(f"  [nmap-parser] {interesting_count} interesting port(s) across "
+                  f"{len(nmap_interesting)} host(s)")
+        except Exception as e:
+            print(f"  [nmap-parser] skipped — {e}")
+    nmap_info["parsed_hosts"]   = nmap_parsed
+    nmap_info["interesting"]    = nmap_interesting
+    # ─────────────────────────────────────────────────────────────────────────
+
     results = {
         "total_subdomains_probed": len(all_subdomains),
-        "live_hosts": httpx_results,
-        "live_count": len(httpx_results),
+        "live_hosts":    httpx_results,
+        "live_count":    len(httpx_results),
         "waf_detection": waf_results,
-        "nmap": nmap_info,
+        "nmap":          nmap_info,
         "screenshots_dir": ss_dir,
     }
     (active_dir / "active_results.json").write_text(json.dumps(results, indent=2, default=str))

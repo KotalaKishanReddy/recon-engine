@@ -58,9 +58,9 @@ def print_summary(aggregated: dict, new_findings: list, run_id: str, out_dir: Pa
     print("=" * 60)
     for domain, sig in aggregated.get("domain_signals", {}).items():
         p = sig.get("priority", "")
-        icon = "🔴" if "HIGH" in p else "🟡" if "MEDIUM" in p else "🟢"
+        icon = "\U0001f534" if "HIGH" in p else "\U0001f7e1" if "MEDIUM" in p else "\U0001f7e2"
         print(f"  {icon}  {domain:<35} score={sig.get('interest_score', 0):<6} {p}")
-    print("="*60 + "\n")
+    print("=" * 60 + "\n")
 
 
 async def main():
@@ -74,8 +74,7 @@ async def main():
     parser.add_argument("--history",  action="store_true",    help="Show last 10 run history")
     args = parser.parse_args()
 
-    config = load_config(args.config)
-
+    # ── Bug 4 fix: --history must not require config.yaml to exist ────────────
     if args.history:
         rows = get_run_history(10)
         if not rows:
@@ -83,9 +82,11 @@ async def main():
         for r in rows:
             s = r["summary"]
             print(f"  [{r['created_at'][:16]}]  {r['run_id']}  profile={r['profile']}  "
-                  f"findings={s.get('total_findings',0)}  "
-                  f"critical={s.get('by_severity',{}).get('critical',0)}")
+                  f"findings={s.get('total_findings', 0)}  "
+                  f"critical={s.get('by_severity', {}).get('critical', 0)}")
         return
+
+    config = load_config(args.config)
 
     if not args.csv:
         parser.print_help()
@@ -126,7 +127,7 @@ async def main():
     print("\n[*] Aggregating & scoring...")
     aggregated  = score_and_aggregate(passive_results, active_results, vuln_results, config, run_dir)
     new_findings, findings_with_flags = diff_findings(run_id, aggregated.get("findings", []))
-    aggregated["findings"] = findings_with_flags  # inject is_new flag into report
+    aggregated["findings"] = findings_with_flags
 
     # ── Save run to history DB ────────────────────────────────────────────────
     save_run(run_id, args.profile, scope_hash(targets), {
@@ -141,14 +142,14 @@ async def main():
     report_path = generate_report(aggregated, passive_results, active_results, run_id, args.profile, run_dir)
 
     print_summary(aggregated, new_findings, run_id, run_dir)
-    print(f"  📄 Report  : {report_path}")
+    print(f"  \U0001f4c4 Report  : {report_path}")
 
     if new_findings:
-        print(f"\n  🚨 {len(new_findings)} NEW findings since last run:")
+        print(f"\n  \U0001f6a8 {len(new_findings)} NEW findings since last run:")
         for f in new_findings[:5]:
-            print(f"     [{f.get('severity','?').upper():8}] {f.get('title','')[:55]}  ({f.get('host','')})")
+            print(f"     [{f.get('severity', '?').upper():8}] {f.get('title', '')[:55]}  ({f.get('host', '')})")
         if len(new_findings) > 5:
-            print(f"     ... and {len(new_findings)-5} more. See report.")
+            print(f"     ... and {len(new_findings) - 5} more. See report.")
 
 
 if __name__ == "__main__":
