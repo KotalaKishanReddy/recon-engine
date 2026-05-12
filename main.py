@@ -1,157 +1,155 @@
-#!/usr/bin/env python3
 """
-ReconEngine — main.py
-Usage: python main.py --csv scope.csv [--profile fast|deep|stealth] [--run-id myrun]
-
-Pipeline:
-  1. Parse CSV -> extract scope
-  2. Passive recon (subfinder, amass, crt.sh, theHarvester)
-  3. Active recon (httpx, nmap, wafw00f, gowitness)
-  4. Vulnerability scan (nuclei, paramspider, gf)
-  5. Score & aggregate
-  6. Generate HTML report
+main.py — ReconEngine CLI
+Usage:
+    python main.py --csv samples/hackerone_sample_scope.csv --profile fast
+    python main.py --csv scope.csv --profile deep
+    python main.py --csv scope.csv --profile stealth
+    python main.py --history          # show last 10 runs
 """
-import asyncio
 import argparse
+import asyncio
+import hashlib
 import json
 import sys
-import yaml
-import shutil
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
+import yaml
+
+# ── local imports ─────────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
-from parser.csv_parser             import parse_csv, print_summary
-from modules.passive.passive_recon import run_passive
-from modules.active.active_recon   import run_active
-from modules.vuln.vuln_scan        import run_vuln
-from aggregator.scorer             import score_and_aggregate
-from reporter.reporter             import generate_report
+from parser.csv_parser      import parse_scope_csv
+from modules.passive        import run_passive
+from modules.active         import run_active
+from modules.vuln           import run_vuln_scan
+from aggregator             import score_and_aggregate
+from reporter               import generate_report
+from db                     import save_run, diff_findings, get_run_history
 
-BANNER = """
-  ____                        _____             _
- |  _ \\  ___  ___ ___  _ __  | ____|_ __   __ _(_)_ __   ___
- | |_) |/ _ \\/ __/ _ \\| '_ \\ |  _| | '_ \\ / _` | | '_ \\ / _ \\
- |  _ <  __/ (_| (_) | | | || |___| | | | (_| | | | | |  __/
- |_| \\_\\___|\\___\\___/|_| |_||_____|_| |_|\\__, |_|_| |_|\\___|
-                                              |___/
-  Bug Bounty Recon Automation — For authorized use only.
+BANNER = r"""
+  ____                      _____             _
+ |  _ \ ___  ___ ___  _ __ | ____|_ __   __ _(_)_ __   ___
+ | |_) / _ \/ __/ _ \| '_ \|  _| | '_ \ / _` | | '_ \ / _ \
+ |  _ <  __/ (_| (_) | | | | |___| | | | (_| | | | | |  __/
+ |_| \_\___|\___\___/|_| |_|_____|_| |_|\__, |_|_| |_|\___|
+                                         |___/
+  Bug Bounty Recon Orchestrator  |  For authorized use only
 """
 
 
-def load_config(path="config.yaml"):
-    cfg = Path(path)
-    if not cfg.exists():
-        print(f"[!] {path} not found. Using defaults.")
-        return {}
-    with open(cfg) as f:
-        return yaml.safe_load(f) or {}
+def load_config(path: str = "config.yaml") -> dict:
+    with open(path) as f:
+        return yaml.safe_load(f)
 
 
-def check_tools(config):
-    tools = config.get("tools", {})
-    for name, binary in tools.items():
-        found = shutil.which(binary) is not None
-        print(f"  [{'OK' if found else 'MISSING'}] {name:<15} ({binary})")
+def scope_hash(targets: dict) -> str:
+    raw = json.dumps(targets, sort_keys=True)
+    return hashlib.md5(raw.encode()).hexdigest()[:8]
 
 
-def get_profile(config, name):
-    profiles = config.get("profiles", {})
-    default  = config.get("default_profile", "fast")
-    return profiles.get(name, profiles.get(default, {
-        "passive": True, "active": True, "vuln": False,
-        "screenshots": False, "threads": 20, "rate_limit": 150,
-    }))
-
-
-async def run_pipeline(args, config):
-    print(BANNER)
-    run_id       = args.run_id or datetime.now().strftime("%Y%m%d_%H%M%S")
-    profile_name = args.profile or config.get("default_profile", "fast")
-    profile      = get_profile(config, profile_name)
-
-    print(f"[*] Run ID  : {run_id}")
-    print(f"[*] CSV     : {args.csv}")
-    print(f"[*] Profile : {profile_name}")
-
-    out_dir = Path(config.get("output_dir", "./output")) / run_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[*] Output  : {out_dir}\n")
-
-    print("[*] Tool availability:")
-    check_tools(config)
-    print()
-
-    # ── Step 1: Parse ────────────────────────────────────────
-    print("=" * 50 + "\n  STEP 1: Parsing scope CSV\n" + "=" * 50)
-    targets     = parse_csv(args.csv)
-    print_summary(targets)
-    web_targets = [t for t in targets if not t.skip and t.eligible_for_bounty]
-    if not web_targets:
-        print("[!] No web targets found. Exiting."); return
-    apex_domains = list(dict.fromkeys(t.apex_domain for t in web_targets))
-    print(f"[*] Apex domains: {apex_domains}\n")
-    (out_dir / "scope.json").write_text(json.dumps([t.to_dict() for t in web_targets], indent=2))
-
-    # ── Step 2: Passive ──────────────────────────────────────
-    print("=" * 50 + "\n  STEP 2: Passive Reconnaissance\n" + "=" * 50)
-    if profile.get("passive", True):
-        passive_results = await run_passive(apex_domains, out_dir, config)
-        total = sum(len(d.get("subdomains", [])) for d in passive_results.values())
-        print(f"\n  Done. Subdomains found: {total}\n")
-    else:
-        passive_results = {d: {"domain": d, "subdomains": [d], "emails": []} for d in apex_domains}
-        print("  Skipped.\n")
-
-    # ── Step 3: Active ───────────────────────────────────────
-    print("=" * 50 + "\n  STEP 3: Active Reconnaissance\n" + "=" * 50)
-    if profile.get("active", True):
-        active_results = await run_active(passive_results, out_dir, config, profile)
-        print(f"\n  Done. Live hosts: {active_results.get('live_count', 0)}\n")
-    else:
-        active_results = {"live_hosts": [], "live_count": 0, "waf_detection": {}, "nmap": {}}
-        print("  Skipped.\n")
-
-    # ── Step 4: Vuln ─────────────────────────────────────────
-    print("=" * 50 + "\n  STEP 4: Vulnerability Scanning\n" + "=" * 50)
-    if profile.get("vuln", False):
-        vuln_results = await run_vuln(active_results, passive_results, out_dir, config)
-        print(f"\n  Done. Nuclei findings: {vuln_results.get('nuclei_count', 0)}\n")
-    else:
-        vuln_results = {"nuclei_findings": [], "nuclei_count": 0, "param_urls": {}, "gf_patterns": {}}
-        print("  Skipped (use --profile deep to enable).\n")
-
-    # ── Step 5: Score ────────────────────────────────────────
-    print("=" * 50 + "\n  STEP 5: Scoring & Aggregation\n" + "=" * 50)
-    aggregated = score_and_aggregate(passive_results, active_results, vuln_results, config, out_dir)
-
-    # ── Step 6: Report ───────────────────────────────────────
-    print("\n" + "=" * 50 + "\n  STEP 6: Generating Report\n" + "=" * 50)
-    report_path = generate_report(aggregated, passive_results, active_results, run_id, profile_name, out_dir)
-
-    print("\n" + "=" * 50 + "\n  SCAN COMPLETE\n" + "=" * 50)
+def print_summary(aggregated: dict, new_findings: list, run_id: str, out_dir: Path) -> None:
     by_sev = aggregated.get("by_severity", {})
-    print(f"  Critical : {by_sev.get('critical', 0)}")
-    print(f"  High     : {by_sev.get('high', 0)}")
-    print(f"  Medium   : {by_sev.get('medium', 0)}")
-    print(f"  Low      : {by_sev.get('low', 0)}")
-    print(f"  Report   : {report_path}\n")
-    for domain, sig in sorted(
-        aggregated.get("domain_signals", {}).items(),
-        key=lambda x: -x[1].get("interest_score", 0)
-    ):
-        print(f"    {sig.get('priority', '')} -- {domain}")
+    print("\n" + "=" * 60)
+    print(f"  Run ID  : {run_id}")
+    print(f"  Output  : {out_dir}")
+    print(f"  Total   : {aggregated.get('total_findings', 0)} findings")
+    print(f"  NEW     : {len(new_findings)} new since last scan")
+    print(f"  " + "  ".join(f"{k.upper()}: {v}" for k, v in by_sev.items() if v))
+    print("=" * 60)
+    for domain, sig in aggregated.get("domain_signals", {}).items():
+        p = sig.get("priority", "")
+        icon = "🔴" if "HIGH" in p else "🟡" if "MEDIUM" in p else "🟢"
+        print(f"  {icon}  {domain:<35} score={sig.get('interest_score', 0):<6} {p}")
+    print("="*60 + "\n")
 
 
-def main():
-    p = argparse.ArgumentParser(description="ReconEngine -- Automated Bug Bounty Recon Pipeline")
-    p.add_argument("--csv",     required=True)
-    p.add_argument("--profile", default=None,          help="fast | deep | stealth")
-    p.add_argument("--run-id",  default=None)
-    p.add_argument("--config",  default="config.yaml")
-    args = p.parse_args()
-    asyncio.run(run_pipeline(args, load_config(args.config)))
+async def main():
+    print(BANNER)
+    parser = argparse.ArgumentParser(description="ReconEngine — Bug Bounty Recon Orchestrator")
+    parser.add_argument("--csv",      help="Path to HackerOne/Bugcrowd scope CSV")
+    parser.add_argument("--profile",  default="fast", choices=["fast", "deep", "stealth"],
+                        help="Scan profile (default: fast)")
+    parser.add_argument("--config",   default="config.yaml", help="Config file path")
+    parser.add_argument("--output",   default="",             help="Custom output directory")
+    parser.add_argument("--history",  action="store_true",    help="Show last 10 run history")
+    args = parser.parse_args()
+
+    config = load_config(args.config)
+
+    if args.history:
+        rows = get_run_history(10)
+        if not rows:
+            print("No runs in history yet.")
+        for r in rows:
+            s = r["summary"]
+            print(f"  [{r['created_at'][:16]}]  {r['run_id']}  profile={r['profile']}  "
+                  f"findings={s.get('total_findings',0)}  "
+                  f"critical={s.get('by_severity',{}).get('critical',0)}")
+        return
+
+    if not args.csv:
+        parser.print_help()
+        sys.exit(1)
+
+    # ── Setup ─────────────────────────────────────────────────────────────────
+    run_id  = datetime.now().strftime("%Y%m%d_%H%M%S")
+    profile = config["profiles"].get(args.profile, config["profiles"]["fast"])
+    targets = parse_scope_csv(Path(args.csv))
+    domains = targets.get("domains", [])
+
+    if not domains:
+        print("[!] No valid in-scope domains found in CSV. Check format.")
+        sys.exit(1)
+
+    out_root = Path(args.output) if args.output else Path(config.get("output_dir", "./output"))
+    run_dir  = out_root / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"[*] Domains in scope  : {domains}")
+    print(f"[*] Profile           : {args.profile}")
+    print(f"[*] Output directory  : {run_dir}")
+    print(f"[*] Run ID            : {run_id}\n")
+
+    # ── Phase 1: Passive ──────────────────────────────────────────────────────
+    print("[Phase 1/3] Passive Recon...")
+    passive_results = await run_passive(domains, run_dir, config)
+
+    # ── Phase 2: Active ───────────────────────────────────────────────────────
+    print("\n[Phase 2/3] Active Recon...")
+    active_results = await run_active(passive_results, run_dir, config, profile)
+
+    # ── Phase 3: Vuln Scan ────────────────────────────────────────────────────
+    print("\n[Phase 3/3] Vuln Scan...")
+    vuln_results = await run_vuln_scan(passive_results, active_results, run_dir, config, profile)
+
+    # ── Aggregate + Diff ──────────────────────────────────────────────────────
+    print("\n[*] Aggregating & scoring...")
+    aggregated  = score_and_aggregate(passive_results, active_results, vuln_results, config, run_dir)
+    new_findings, findings_with_flags = diff_findings(run_id, aggregated.get("findings", []))
+    aggregated["findings"] = findings_with_flags  # inject is_new flag into report
+
+    # ── Save run to history DB ────────────────────────────────────────────────
+    save_run(run_id, args.profile, scope_hash(targets), {
+        "total_findings":  aggregated.get("total_findings", 0),
+        "by_severity":     aggregated.get("by_severity", {}),
+        "new_findings":    len(new_findings),
+        "live_hosts":      active_results.get("live_count", 0),
+    })
+
+    # ── Generate Report ───────────────────────────────────────────────────────
+    print("[*] Generating report...")
+    report_path = generate_report(aggregated, passive_results, active_results, run_id, args.profile, run_dir)
+
+    print_summary(aggregated, new_findings, run_id, run_dir)
+    print(f"  📄 Report  : {report_path}")
+
+    if new_findings:
+        print(f"\n  🚨 {len(new_findings)} NEW findings since last run:")
+        for f in new_findings[:5]:
+            print(f"     [{f.get('severity','?').upper():8}] {f.get('title','')[:55]}  ({f.get('host','')})")
+        if len(new_findings) > 5:
+            print(f"     ... and {len(new_findings)-5} more. See report.")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
