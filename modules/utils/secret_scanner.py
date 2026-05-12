@@ -1,7 +1,11 @@
 """
 secret_scanner.py
-Scans HTTP response bodies and JS files for leaked secrets:
-API keys, tokens, passwords, private keys.
+Scans HTTP response bodies and JS files for leaked secrets.
+
+Fix B-07: scan_js_files() now parses live HTML for real <script src> URLs
+          instead of trying 5 hardcoded paths. Hashed filenames (main.abc123.js)
+          are discovered automatically. Hardcoded paths used only as fallback.
+          content-type check broadened to accept text/javascript AND application/javascript.
 """
 import re
 import asyncio
@@ -28,11 +32,18 @@ SECRET_PATTERNS: List[tuple] = [
     ("Password in URL",       r"(?i)https?://[^:]+:[^@]{6,}@"),
     ("DB Connection String",  r"(?i)(mysql|postgres|mongodb|redis)://[^\s'\"]{10,}"),
     ("Generic API Key",       r"(?i)(api_key|apikey|api-key)[^\w]{1,5}['\"][0-9a-zA-Z]{16,45}['\"]"),
-    ("Generic Secret",        r"(?i)(secret|password|passwd|token)[^\w]{1,5}['\"][^'\"\s]{8,40}['\"]"),
+    ("Generic Secret",        r"(?i)(secret|password|passwd|token)[^\w]{1,5}[^'\"\s]{8,40}"),
     ("JWT Token",             r"eyJ[A-Za-z0-9-_]{10,}\.[A-Za-z0-9-_]{10,}\.[A-Za-z0-9-_]{10,}"),
 ]
 
 COMPILED = [(label, re.compile(pattern)) for label, pattern in SECRET_PATTERNS]
+
+_JS_FALLBACK_PATHS = [
+    "/app.js", "/main.js", "/bundle.js",
+    "/static/js/main.chunk.js", "/assets/index.js",
+]
+_SCRIPT_SRC_RE = re.compile(r'<script[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+_JS_CONTENT_TYPES = ("javascript", "ecmascript", "text/plain")
 
 
 def scan_text(text: str, source_url: str = "") -> List[Dict]:
@@ -41,33 +52,89 @@ def scan_text(text: str, source_url: str = "") -> List[Dict]:
         for match in pattern.finditer(text):
             snippet = match.group(0)[:120]
             findings.append({
-                "type": label,
-                "match": snippet,
+                "type":   label,
+                "match":  snippet,
+                "file":   source_url,
                 "source": source_url,
-                "line": text[:match.start()].count("\n") + 1,
+                "line":   text[:match.start()].count("\n") + 1,
             })
     return findings
 
 
-async def scan_js_files(live_hosts: List[Dict], session: aiohttp.ClientSession) -> List[Dict]:
-    """Fetches JS files from live hosts and scans for secrets."""
-    all_secrets = []
-    for host in live_hosts[:20]:  # cap to avoid huge runtimes
+def _is_js_content_type(ct: str) -> bool:
+    ct_lower = ct.lower()
+    return any(t in ct_lower for t in _JS_CONTENT_TYPES)
+
+
+def _resolve_url(src: str, base_url: str) -> str:
+    """Resolve a <script src> value to an absolute URL."""
+    if src.startswith("http://") or src.startswith("https://"):
+        return src
+    if src.startswith("//"):
+        scheme = base_url.split(":")[0]
+        return f"{scheme}:{src}"
+    base = base_url.rstrip("/")
+    return base + "/" + src.lstrip("/")
+
+
+async def scan_js_files(
+    live_hosts: List[Dict],
+    session: aiohttp.ClientSession,
+    per_host_timeout: int = 10,
+) -> List[Dict]:
+    """
+    B-07 fix:
+    1. Fetch live host HTML and extract real <script src> URLs (catches hashed filenames).
+    2. Fetch and scan each discovered JS file for secrets.
+    3. Fall back to hardcoded paths only when HTML fetch fails or yields no scripts.
+    """
+    all_secrets: List[Dict] = []
+
+    for host in live_hosts[:20]:
         url = host.get("url", "")
         if not url:
             continue
-        # Try common JS paths
-        for js_path in ["/app.js", "/main.js", "/bundle.js", "/static/js/main.chunk.js", "/assets/index.js"]:
+
+        # Step 1 — discover real JS URLs from page HTML
+        js_urls: List[str] = []
+        try:
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=per_host_timeout), ssl=False
+            ) as resp:
+                if resp.status == 200:
+                    html = await resp.text(errors="ignore")
+                    for src in _SCRIPT_SRC_RE.findall(html):
+                        js_urls.append(_resolve_url(src, url))
+        except Exception:
+            pass
+
+        # Step 2 — fallback to hardcoded paths when discovery fails
+        if not js_urls:
+            js_urls = [url.rstrip("/") + p for p in _JS_FALLBACK_PATHS]
+
+        # Deduplicate, cap at 10 JS files per host
+        seen: set = set()
+        unique_js: List[str] = []
+        for u in js_urls:
+            if u not in seen:
+                seen.add(u)
+                unique_js.append(u)
+        unique_js = unique_js[:10]
+
+        # Step 3 — fetch each JS file and scan
+        for js_url in unique_js:
             try:
-                async with session.get(url.rstrip("/") + js_path,
-                                       timeout=aiohttp.ClientTimeout(total=10),
-                                       ssl=False) as resp:
-                    if resp.status == 200 and "javascript" in resp.headers.get("content-type", ""):
+                async with session.get(
+                    js_url, timeout=aiohttp.ClientTimeout(total=per_host_timeout), ssl=False
+                ) as resp:
+                    ct = resp.headers.get("content-type", "")
+                    if resp.status == 200 and _is_js_content_type(ct):
                         body = await resp.text(errors="ignore")
-                        hits = scan_text(body, url + js_path)
+                        hits = scan_text(body, js_url)
                         all_secrets.extend(hits)
             except Exception:
                 pass
+
     if all_secrets:
-        print(f"  [secret_scanner] {len(all_secrets)} potential secrets in JS files")
+        print(f"  [secret_scanner] {len(all_secrets)} potential secret(s) found in JS files")
     return all_secrets

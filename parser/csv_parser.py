@@ -1,13 +1,15 @@
 """
 csv_parser.py
 Parses HackerOne / Bugcrowd scope CSV exports into normalized target objects.
+
+Fix B-01: Added parse_scope_csv() wrapper that main.py imports.
 """
 import csv
 import re
 import json
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 ASSET_TYPES = {
     "wildcard": r"^\*\.[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}$",
@@ -38,7 +40,7 @@ class Target:
     source_row: int = 0
     skip: bool = False
 
-    def to_dict(self):
+    def to_dict(self) -> Dict:
         return asdict(self)
 
 
@@ -70,6 +72,7 @@ def _extract_apex(raw: str, asset_type: str) -> str:
 
 
 def parse_csv(filepath: str) -> List[Target]:
+    """Core parser — returns List[Target]."""
     path = Path(filepath)
     if not path.exists():
         raise FileNotFoundError(f"CSV not found: {filepath}")
@@ -122,22 +125,44 @@ def parse_csv(filepath: str) -> List[Target]:
     return targets
 
 
-def print_summary(targets: List[Target]):
+def print_summary(targets: List[Target]) -> None:
     total    = len(targets)
     skipped  = sum(1 for t in targets if t.skip)
     web_tgts = [t for t in targets if not t.skip]
-    types    = {}
+    types: Dict[str, int] = {}
     for t in web_tgts:
         types[t.asset_type] = types.get(t.asset_type, 0) + 1
     print(f"\n{'─'*50}")
     print(f"  CSV Parse Summary")
     print(f"{'─'*50}")
-    print(f"  Total rows      : {total}")
+    print(f"  Total rows       : {total}")
     print(f"  Skipped (non-web): {skipped}")
-    print(f"  Web targets     : {len(web_tgts)}")
+    print(f"  Web targets      : {len(web_tgts)}")
     for t, c in sorted(types.items()):
         print(f"    {t:<12}: {c}")
     print(f"{'─'*50}\n")
+
+
+def parse_scope_csv(filepath) -> Dict[str, Any]:
+    """
+    B-01 fix: wrapper called by main.py.
+    Accepts str or Path. Returns:
+        {
+          'domains':  [apex domain strings, deduplicated, sorted],
+          'targets':  [serialised Target dicts],
+          'skipped':  [serialised Target dicts for non-web assets],
+        }
+    """
+    targets = parse_csv(str(filepath))
+    print_summary(targets)
+    domains = sorted({t.apex_domain for t in targets
+                      if not t.skip and t.apex_domain and t.eligible_for_bounty})
+    skipped = [t.to_dict() for t in targets if t.skip]
+    return {
+        "domains": domains,
+        "targets": [t.to_dict() for t in targets],
+        "skipped": skipped,
+    }
 
 
 if __name__ == "__main__":
@@ -145,5 +170,5 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python csv_parser.py <scope.csv>")
         sys.exit(1)
-    tgts = parse_csv(sys.argv[1])
-    print_summary(tgts)
+    result = parse_scope_csv(sys.argv[1])
+    print(f"Apex domains: {result['domains']}")

@@ -18,6 +18,9 @@ api_keys:
   virustotal: ""
   chaos: ""
 
+# Max domains processed concurrently during passive phase (avoid DNS rate-limits)
+passive_concurrency: 5
+
 profiles:
   fast:
     passive: true
@@ -26,6 +29,22 @@ profiles:
     screenshots: false
     threads: 20
     rate_limit: 150
+    # per-phase hard timeouts (seconds)
+    passive_timeout: 600       # 10 min total for all passive tasks
+    per_domain_timeout: 240    # 4 min per domain (subfinder+amass+crt.sh)
+    active_timeout: 900        # 15 min total active phase
+    vuln_timeout: 1800         # 30 min total vuln phase (skipped in fast)
+    subfinder_timeout: 120
+    amass_timeout: 180
+    httpx_timeout: 600
+    nmap_timeout: 600
+    nuclei_timeout: 1800
+    ffuf_timeout: 300
+    waybackurls_timeout: 120
+    paramspider_timeout: 120
+    wafw00f_timeout: 30
+    gowitness_timeout: 600
+
   deep:
     passive: true
     active: true
@@ -33,6 +52,21 @@ profiles:
     screenshots: true
     threads: 10
     rate_limit: 50
+    passive_timeout: 1800      # 30 min
+    per_domain_timeout: 600    # 10 min per domain
+    active_timeout: 2400       # 40 min
+    vuln_timeout: 7200         # 2 hours
+    subfinder_timeout: 300
+    amass_timeout: 600
+    httpx_timeout: 1200
+    nmap_timeout: 1200
+    nuclei_timeout: 3600
+    ffuf_timeout: 600
+    waybackurls_timeout: 300
+    paramspider_timeout: 240
+    wafw00f_timeout: 30
+    gowitness_timeout: 1200
+
   stealth:
     passive: true
     active: false
@@ -40,6 +74,20 @@ profiles:
     screenshots: false
     threads: 5
     rate_limit: 10
+    passive_timeout: 1200      # 20 min (slower tools)
+    per_domain_timeout: 480
+    active_timeout: 0
+    vuln_timeout: 0
+    subfinder_timeout: 240
+    amass_timeout: 480
+    httpx_timeout: 600
+    nmap_timeout: 0
+    nuclei_timeout: 0
+    ffuf_timeout: 0
+    waybackurls_timeout: 180
+    paramspider_timeout: 180
+    wafw00f_timeout: 0
+    gowitness_timeout: 0
 
 default_profile: fast
 
@@ -56,6 +104,8 @@ nuclei_tags:
 nmap_top_ports: 1000
 nmap_flags: "-sV -sC --open"
 
+ffuf_wordlist: /usr/share/wordlists/dirb/common.txt
+
 scoring:
   nuclei_critical: 100
   nuclei_high: 80
@@ -66,3 +116,5 @@ scoring:
   exposed_git: 85
   many_open_ports: 40
   juicy_params: 35
+  nmap_high_risk_port: 55
+  nmap_medium_risk_port: 30
