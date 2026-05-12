@@ -4,9 +4,10 @@ Runs: nuclei, gf patterns, ffuf, paramspider, waybackurls, secret scanner.
 Outputs structured findings dict for the aggregator.
 
 Fixes applied:
-  B-02: scan_js_files() now imported and called — secret_hits always populated
-  B-04: ffuf targets use root URL (scheme://host), filename uses netloc only
-  B-09: paramspider --quiet removed (flag dropped in v2.x)
+  B-02: secret_scanner.scan_js_files() now called; secret_hits in output.
+  B-04: ffuf fuzzes root URL (scheme+netloc), not path-suffixed URL;
+        output filename uses netloc, eliminating collisions.
+  B-09: paramspider --quiet flag removed (not in v2.x).
 """
 import asyncio
 import json
@@ -15,8 +16,6 @@ from pathlib import Path
 from typing import List, Dict, Any
 
 import aiohttp
-
-from modules.utils.secret_scanner import scan_js_files   # B-02
 
 
 async def run_tool(cmd: List[str], timeout: int = 600, input_data: str = None) -> str:
@@ -110,7 +109,7 @@ async def run_paramspider(domains: List[str], out_dir: Path) -> List[str]:
     all_params: List[str] = []
     for domain in domains[:10]:
         ps_out = out_dir / f"paramspider_{domain}.txt"
-        # B-09 FIX: --quiet removed (flag dropped in paramspider v2.x)
+        # B-09 fix: removed --quiet (not available in paramspider v2.x)
         await run_tool([
             "paramspider",
             "--domain", domain,
@@ -128,7 +127,12 @@ async def run_paramspider(domains: List[str], out_dir: Path) -> List[str]:
 INTERESTING_STATUS = [200, 201, 204, 301, 302, 307, 401, 403]
 
 async def run_ffuf(target_urls: List[str], wordlist: str, out_dir: Path) -> List[Dict]:
-    """Fuzz root of top 5 most interesting hosts."""
+    """Fuzz root of top 5 most interesting hosts.
+
+    B-04 fix:
+      - Extract scheme+netloc only so ffuf targets /<FUZZ> not /existing-path/FUZZ.
+      - Use netloc as filename component to eliminate collision between paths on same host.
+    """
     results: List[Dict] = []
     wl = Path(wordlist)
     if not wl.exists():
@@ -140,22 +144,22 @@ async def run_ffuf(target_urls: List[str], wordlist: str, out_dir: Path) -> List
             "server-status", "server-info", "robots.txt", "sitemap.xml",
         ]))
 
-    # B-04 FIX: deduplicate by root URL (scheme://netloc) to avoid
-    # fuzzing paths and colliding output filenames.
-    seen_roots: set = set()
-    root_urls: List[str] = []
+    # Deduplicate to unique origins before fuzzing
+    seen_origins = set()
+    unique_targets = []
     for url in target_urls:
         parsed = urllib.parse.urlparse(url)
-        root   = f"{parsed.scheme}://{parsed.netloc}"
-        if root not in seen_roots:
-            seen_roots.add(root)
-            root_urls.append(root)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        if origin not in seen_origins and parsed.netloc:
+            seen_origins.add(origin)
+            unique_targets.append(origin)
 
-    for root in root_urls[:5]:
-        netloc   = urllib.parse.urlparse(root).netloc.replace(":", "_")
-        out_file = out_dir / f"ffuf_{netloc}.json"          # collision-safe name
+    for base in unique_targets[:5]:
+        parsed   = urllib.parse.urlparse(base)
+        safe_name = parsed.netloc.replace(":", "_")   # e.g. sub.example.com or sub.example.com_8080
+        out_file  = out_dir / f"ffuf_{safe_name}.json"
         await run_tool([
-            "ffuf", "-u", f"{root}/FUZZ",
+            "ffuf", "-u", f"{base}/FUZZ",
             "-w", str(wl),
             "-o", str(out_file), "-of", "json",
             "-mc", ",".join(str(s) for s in INTERESTING_STATUS),
@@ -199,25 +203,27 @@ async def run_vuln_scan(
             "paramspider_urls": [], "secret_hits": [], "archived_url_count": 0,
         }
 
-    # Step 1: Archived URLs + param discovery
+    # Step 1: archived URLs via waybackurls + paramspider → gf
     archived_urls = await run_waybackurls(apex_domains, vuln_dir)
     param_urls    = await run_paramspider(apex_domains, vuln_dir)
     all_urls_for_gf = list(set(archived_urls + param_urls + live_urls))
 
-    # Step 2: Nuclei
-    nuclei_tags     = config.get("nuclei_tags", ["exposure", "misconfig", "takeover", "cve", "default-logins", "panel"])
+    # Step 2: Nuclei on live URLs
+    nuclei_tags     = config.get("nuclei_tags",
+                        ["exposure", "misconfig", "takeover", "cve", "default-logins", "panel"])
     nuclei_findings = await run_nuclei(live_urls, vuln_dir, nuclei_tags)
 
-    # Step 3: GF patterns
+    # Step 3: GF patterns on all URLs
     gf_patterns = await run_gf(all_urls_for_gf, vuln_dir)
 
-    # Step 4: FFUF
+    # Step 4: FFUF directory fuzzing on unique root origins
     wordlist  = config.get("ffuf_wordlist", "/usr/share/wordlists/dirb/common.txt")
     ffuf_hits = await run_ffuf(live_urls, wordlist, vuln_dir)
 
-    # Step 5: B-02 FIX — run secret scanner on live JS files
+    # Step 5: B-02 fix — secret scanner on live hosts' JS files
     secret_hits: List[Dict] = []
     try:
+        from modules.utils.secret_scanner import scan_js_files
         connector = aiohttp.TCPConnector(ssl=False)
         async with aiohttp.ClientSession(connector=connector) as session:
             secret_hits = await scan_js_files(live_hosts, session)
@@ -229,7 +235,7 @@ async def run_vuln_scan(
         "gf_patterns":        gf_patterns,
         "ffuf_hits":          ffuf_hits,
         "paramspider_urls":   param_urls,
-        "secret_hits":        secret_hits,        # B-02: always present
+        "secret_hits":        secret_hits,
         "archived_url_count": len(archived_urls),
     }
     (vuln_dir / "vuln_results.json").write_text(json.dumps(output, indent=2, default=str))

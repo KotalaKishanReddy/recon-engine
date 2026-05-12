@@ -6,8 +6,8 @@ Usage:
     python main.py --csv scope.csv --profile stealth
     python main.py --history          # show last 10 runs
 
-Fix applied (B-08): calls db.set_db_path(out_root) so the SQLite history
-DB lives alongside scan output rather than hardcoded to ./output/.
+Fix B-08: calls db.set_db_path(out_root) after resolving output directory
+  so the history DB co-locates with scan output.
 """
 import argparse
 import asyncio
@@ -19,6 +19,7 @@ from pathlib import Path
 
 import yaml
 
+# ── local imports ─────────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
 from parser.csv_parser      import parse_scope_csv
 from modules.passive        import run_passive
@@ -56,7 +57,7 @@ def print_summary(aggregated: dict, new_findings: list, run_id: str, out_dir: Pa
     print(f"  Output  : {out_dir}")
     print(f"  Total   : {aggregated.get('total_findings', 0)} findings")
     print(f"  NEW     : {len(new_findings)} new since last scan")
-    print("  " + "  ".join(f"{k.upper()}: {v}" for k, v in by_sev.items() if v))
+    print(f"  " + "  ".join(f"{k.upper()}: {v}" for k, v in by_sev.items() if v))
     print("=" * 60)
     for domain, sig in aggregated.get("domain_signals", {}).items():
         p    = sig.get("priority", "")
@@ -72,11 +73,11 @@ async def main():
     parser.add_argument("--profile", default="fast", choices=["fast", "deep", "stealth"],
                         help="Scan profile (default: fast)")
     parser.add_argument("--config",  default="config.yaml", help="Config file path")
-    parser.add_argument("--output",  default="",            help="Custom output directory")
-    parser.add_argument("--history", action="store_true",   help="Show last 10 run history")
+    parser.add_argument("--output",  default="",             help="Custom output directory")
+    parser.add_argument("--history", action="store_true",    help="Show last 10 run history")
     args = parser.parse_args()
 
-    # B-04 (prev): --history must not require config.yaml
+    # --history must not require config.yaml (prev-audit B-04 fix)
     if args.history:
         rows = get_run_history(10)
         if not rows:
@@ -97,8 +98,8 @@ async def main():
     # ── Setup ─────────────────────────────────────────────────────────────────
     run_id  = datetime.now().strftime("%Y%m%d_%H%M%S")
     profile = config["profiles"].get(args.profile, config["profiles"]["fast"])
-    targets = parse_scope_csv(Path(args.csv))   # B-01 FIX: correct function name
-    domains = targets.get("domains", [])         # now correctly a list of apex domains
+    targets = parse_scope_csv(Path(args.csv))   # B-01 fix: correct function name
+    domains = targets.get("domains", [])
 
     if not domains:
         print("[!] No valid in-scope domains found in CSV. Check format.")
@@ -108,7 +109,7 @@ async def main():
     run_dir  = out_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # B-08 FIX: DB follows the output directory
+    # B-08 fix: point history DB at the resolved output root
     set_db_path(str(out_root))
 
     print(f"[*] Domains in scope  : {domains}")
@@ -130,7 +131,7 @@ async def main():
 
     # ── Aggregate + Diff ──────────────────────────────────────────────────────
     print("\n[*] Aggregating & scoring...")
-    aggregated           = score_and_aggregate(passive_results, active_results, vuln_results, config, run_dir)
+    aggregated = score_and_aggregate(passive_results, active_results, vuln_results, config, run_dir)
     new_findings, findings_with_flags = diff_findings(run_id, aggregated.get("findings", []))
     aggregated["findings"] = findings_with_flags
 

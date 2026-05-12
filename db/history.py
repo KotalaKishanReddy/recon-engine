@@ -3,10 +3,9 @@ history.py
 SQLite-backed run history for delta/diff mode.
 Detects NEW findings that didn't exist in previous scans.
 
-Fix applied (B-08):
-  DB_PATH is no longer hardcoded to ./output/.
-  main.py calls set_db_path(out_root) so the DB follows the --output flag.
-  This prevents history loss when the user points to a different output dir.
+Fix B-08: DB_PATH is no longer hardcoded; set_db_path() allows main.py
+  to co-locate the history DB with the output directory so it survives
+  across --output flags and directory cleanups.
 """
 import sqlite3
 import json
@@ -15,15 +14,12 @@ from pathlib import Path
 from typing import List, Dict, Tuple
 from datetime import datetime
 
-# Default — overridden by main.py via set_db_path() before any DB call
+# B-08 fix: mutable module-level path; overridden by set_db_path() in main.py
 DB_PATH = Path("./output/recon_history.db")
 
 
 def set_db_path(output_dir: str) -> None:
-    """
-    B-08 FIX: Point the DB to the active output directory.
-    Call this in main.py as soon as out_root is resolved.
-    """
+    """Call once in main.py after out_root is resolved."""
     global DB_PATH
     DB_PATH = Path(output_dir) / "recon_history.db"
 
@@ -71,17 +67,19 @@ def save_run(run_id: str, profile: str, scope_hash: str, summary: Dict) -> None:
 
 def diff_findings(run_id: str, findings: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
     """
-    Returns (new_findings, all_findings_with_is_new_flag)
+    Returns (new_findings, all_findings_with_is_new_flag).
     New = fingerprint not seen in any previous run.
     """
     conn    = _connect()
     now     = datetime.utcnow().isoformat()
-    new     = []
-    updated = []
+    new:     List[Dict] = []
+    updated: List[Dict] = []
 
     for f in findings:
-        fp     = _fingerprint(f)
-        row    = conn.execute("SELECT first_seen FROM findings WHERE fingerprint=?", (fp,)).fetchone()
+        fp    = _fingerprint(f)
+        row   = conn.execute(
+            "SELECT first_seen FROM findings WHERE fingerprint=?", (fp,)
+        ).fetchone()
         is_new = row is None
         if is_new:
             conn.execute(
@@ -92,7 +90,10 @@ def diff_findings(run_id: str, findings: List[Dict]) -> Tuple[List[Dict], List[D
             )
             new.append(f)
         else:
-            conn.execute("UPDATE findings SET last_seen=?, run_id=? WHERE fingerprint=?", (now, run_id, fp))
+            conn.execute(
+                "UPDATE findings SET last_seen=?, run_id=? WHERE fingerprint=?",
+                (now, run_id, fp)
+            )
         updated.append({**f, "is_new": is_new})
 
     conn.commit()
@@ -108,4 +109,7 @@ def get_run_history(limit: int = 10) -> List[Dict]:
         (limit,)
     ).fetchall()
     conn.close()
-    return [{"run_id": r[0], "created_at": r[1], "profile": r[2], "summary": json.loads(r[3])} for r in rows]
+    return [
+        {"run_id": r[0], "created_at": r[1], "profile": r[2], "summary": json.loads(r[3])}
+        for r in rows
+    ]

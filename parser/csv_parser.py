@@ -1,13 +1,15 @@
 """
 csv_parser.py
 Parses HackerOne / Bugcrowd scope CSV exports into normalized target objects.
+
+Fix B-01: Added parse_scope_csv() wrapper expected by main.py.
 """
 import csv
 import re
 import json
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
-from typing import List, Optional
+from typing import List, Optional, Union
 
 ASSET_TYPES = {
     "wildcard": r"^\*\.[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}$",
@@ -69,7 +71,7 @@ def _extract_apex(raw: str, asset_type: str) -> str:
     return raw
 
 
-def parse_csv(filepath: str) -> List[Target]:
+def parse_csv(filepath: Union[str, Path]) -> List[Target]:
     path = Path(filepath)
     if not path.exists():
         raise FileNotFoundError(f"CSV not found: {filepath}")
@@ -122,11 +124,30 @@ def parse_csv(filepath: str) -> List[Target]:
     return targets
 
 
+def parse_scope_csv(filepath: Union[str, Path]) -> dict:
+    """
+    B-01 fix: Wrapper function expected by main.py.
+    Accepts str or Path, returns:
+      {"domains": [apex_domain, ...], "targets": [target_dict, ...], "skipped": [target_dict, ...]}
+    Only web-testable targets (non-android/ios) are included in 'domains'.
+    """
+    targets = parse_csv(filepath)
+    domains = sorted({t.apex_domain for t in targets
+                      if not t.skip and t.apex_domain and t.eligible_for_bounty})
+    skipped = [t.to_dict() for t in targets if t.skip]
+    print_summary(targets)
+    return {
+        "domains":  domains,
+        "targets":  [t.to_dict() for t in targets],
+        "skipped":  skipped,
+    }
+
+
 def print_summary(targets: List[Target]):
     total    = len(targets)
     skipped  = sum(1 for t in targets if t.skip)
     web_tgts = [t for t in targets if not t.skip]
-    types    = {}
+    types: dict = {}
     for t in web_tgts:
         types[t.asset_type] = types.get(t.asset_type, 0) + 1
     print(f"\n{'─'*50}")
@@ -140,33 +161,10 @@ def print_summary(targets: List[Target]):
     print(f"{'─'*50}\n")
 
 
-# ── B-01 FIX: parse_scope_csv() wrapper — called by main.py ──────────────────
-def parse_scope_csv(filepath) -> dict:
-    """
-    Public API consumed by main.py.
-    Accepts str or Path.  Returns:
-      {
-        "domains": [<unique apex domains for web targets>],
-        "targets": [<all Target dicts>],
-        "skipped": [<skipped Target dicts>],
-      }
-    """
-    targets = parse_csv(str(filepath))
-    print_summary(targets)
-    web     = [t for t in targets if not t.skip]
-    domains = sorted({t.apex_domain for t in web if t.apex_domain})
-    skipped = [t.to_dict() for t in targets if t.skip]
-    return {
-        "domains": domains,
-        "targets": [t.to_dict() for t in web],
-        "skipped": skipped,
-    }
-
-
 if __name__ == "__main__":
     import sys
     if len(sys.argv) < 2:
         print("Usage: python csv_parser.py <scope.csv>")
         sys.exit(1)
-    tgts = parse_csv(sys.argv[1])
-    print_summary(tgts)
+    result = parse_scope_csv(sys.argv[1])
+    print(f"Domains ready for recon: {result['domains']}")

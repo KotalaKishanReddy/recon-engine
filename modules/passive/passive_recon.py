@@ -3,9 +3,8 @@ passive_recon.py
 Runs all passive recon tools against a list of apex domains.
 No active connections to targets — zero noise, zero legal risk.
 
-Fix applied (B-05): asyncio.Semaphore bounds domain concurrency so
-DNS resolvers / external APIs are not hammered by all domains at once.
-Default: 5 concurrent domains (config: passive_concurrency).
+Fix B-05: asyncio.Semaphore bounds domain concurrency (default 5)
+to prevent DNS rate-limiting from simultaneous blasts.
 """
 import asyncio
 import json
@@ -112,18 +111,24 @@ async def passive_recon_domain(domain: str, out_dir: Path, config: dict) -> Dict
     print(f"  [passive] {domain}: {len(subdomains)} subdomains, {len(emails)} emails")
 
     output = {
-        "domain": domain, "subdomains": subdomains, "emails": emails,
-        "sources": {"subfinder": len(subfinder_subs), "amass": len(amass_subs), "crtsh": len(crtsh_subs)},
+        "domain":     domain,
+        "subdomains": subdomains,
+        "emails":     emails,
+        "sources":    {
+            "subfinder": len(subfinder_subs),
+            "amass":     len(amass_subs),
+            "crtsh":     len(crtsh_subs),
+        },
     }
     (domain_dir / "passive_results.json").write_text(json.dumps(output, indent=2))
     return output
 
 
 async def run_passive(domains: List[str], out_dir: Path, config: dict) -> Dict[str, Any]:
-    # B-05 FIX: bound concurrency — don't fire all domains simultaneously.
-    # DNS rate-limits and external APIs block if too many run at once.
+    # B-05 fix: bound concurrency to prevent DNS rate-limiting
     concurrency = config.get("passive_concurrency", 5)
     sem = asyncio.Semaphore(concurrency)
+    print(f"  [passive] Running {len(domains)} domain(s) with concurrency={concurrency}")
 
     async def bounded(domain: str):
         async with sem:
@@ -133,7 +138,7 @@ async def run_passive(domains: List[str], out_dir: Path, config: dict) -> Dict[s
     final: Dict[str, Any] = {}
     for domain, result in zip(domains, results):
         if isinstance(result, Exception):
-            print(f"  [passive] ERROR for {domain}: {result}")
+            print(f"  [passive] ERROR on {domain}: {result}")
             final[domain] = {"domain": domain, "error": str(result), "subdomains": [], "emails": []}
         else:
             final[domain] = result

@@ -4,10 +4,10 @@ Aggregates all recon results, deduplicates findings,
 assigns priority scores, and produces a unified findings list.
 
 Fixes applied:
-  B-01 (prev): ffuf hits scored via _ffuf_to_findings()
-  B-02 (prev): secret hits scored via _secrets_to_findings()
-  B-03: _nmap_to_findings() added — interesting open ports now scored
-  B-06: domain_signals interest_score boosted by nmap interesting ports
+  prev audit B-01: _ffuf_to_findings() — ffuf hits scored.
+  prev audit B-02: _secrets_to_findings() — secret hits scored.
+  B-03: _nmap_to_findings() — interesting open ports scored.
+  B-06: domain_signals interest_score boosted by nmap port risk.
 """
 import json
 import re
@@ -30,23 +30,27 @@ _MED_FFUF_PATHS  = {"admin", "administrator", "dashboard", "console", "panel",
                     "debug", "actuator", "server-status", "phpinfo.php"}
 
 _SECRET_SEVERITY = {
-    "AWS Access Key":    ("critical", 100),
-    "Private Key":       ("critical", 100),
-    "Stripe Live Key":   ("critical", 95),
-    "GitHub Token":      ("critical", 95),
-    "Slack Token":       ("high",     80),
-    "Twilio Auth Token": ("high",     80),
-    "SendGrid Key":      ("high",     80),
-    "Google API Key":    ("high",     75),
-    "JWT Token":         ("medium",   55),
-    "Bearer Token":      ("medium",   55),
-    "DB Connection String": ("high",  85),
+    "AWS Access Key":       ("critical", 100),
+    "AWS Secret Key":       ("critical", 100),
+    "Private Key (PEM)":    ("critical", 100),
+    "Stripe Live Key":      ("critical",  95),
+    "GitHub Token":         ("critical",  95),
+    "GitHub OAuth":         ("critical",  95),
+    "Slack Token":          ("high",      80),
+    "Twilio Auth Token":    ("high",      80),
+    "SendGrid Key":         ("high",      80),
+    "Google API Key":       ("high",      75),
+    "DB Connection String": ("high",      85),
+    "JWT Token":            ("medium",    55),
+    "Bearer Token":         ("medium",    55),
+    "Basic Auth Creds":     ("medium",    60),
+    "Password in URL":      ("high",      78),
+    "Generic API Key":      ("medium",    50),
+    "Generic Secret":       ("medium",    45),
 }
-_SECRET_DEFAULT = ("high", 75)
+_SECRET_DEFAULT = ("high", 70)
 
-# Nmap port risk levels
-_NMAP_HIGH_RISK_PORTS  = {6379, 27017, 9200, 2375, 11211, 23, 5601, 8888}
-_NMAP_MEDIUM_RISK_PORTS = {21, 22, 25, 3306, 5432, 9090, 3000, 4848, 7001, 8161, 9000}
+_NMAP_HIGH_RISK_PORTS = {6379, 27017, 9200, 2375, 11211, 23, 5432, 3306}
 
 
 @dataclass
@@ -64,6 +68,11 @@ class Finding:
 
     def to_dict(self):
         return asdict(self)
+
+
+def _host_from_url(url: str) -> str:
+    m = re.sub(r"https?://([^/:]+).*", r"\1", url)
+    return m if m != url else url
 
 
 def _nuclei_to_findings(nuclei_findings: List[Dict], weights: Dict) -> List[Finding]:
@@ -117,7 +126,7 @@ def _httpx_to_findings(live_hosts: List[Dict], weights: Dict) -> List[Finding]:
         severity = "high" if score >= 70 else "medium" if score >= 40 else "low"
         findings.append(Finding(
             id=f"httpx_{i}", category="juicy_host", severity=severity, score=score,
-            host=h.get("host", url),
+            host=h.get("host", _host_from_url(url)),
             url=url, title=title or url,
             description=f"Interesting host. Reasons: {', '.join(reasons)}. Tech: {h.get('tech', [])}",
             tags=reasons, raw=h,
@@ -128,9 +137,15 @@ def _httpx_to_findings(live_hosts: List[Dict], weights: Dict) -> List[Finding]:
 def _gf_to_findings(gf_patterns: Dict[str, List[str]], weights: Dict) -> List[Finding]:
     findings = []
     pattern_severity = {
-        "xss": ("high", 75), "sqli": ("high", 80), "rce": ("critical", 95),
-        "lfi": ("high", 78), "ssrf": ("high", 72), "redirect": ("medium", 45),
-        "idor": ("medium", 55), "debug_logic": ("medium", 40), "img-traversal": ("medium", 42),
+        "xss":         ("high",     75),
+        "sqli":        ("high",     80),
+        "rce":         ("critical", 95),
+        "lfi":         ("high",     78),
+        "ssrf":        ("high",     72),
+        "redirect":    ("medium",   45),
+        "idor":        ("medium",   55),
+        "debug_logic": ("medium",   40),
+        "img-traversal":("medium",  42),
     }
     for pattern, urls in gf_patterns.items():
         sev, base_score = pattern_severity.get(pattern, ("low", 20))
@@ -138,7 +153,7 @@ def _gf_to_findings(gf_patterns: Dict[str, List[str]], weights: Dict) -> List[Fi
             findings.append(Finding(
                 id=f"gf_{pattern}_{j}", category="gf_pattern", severity=sev,
                 score=base_score + weights.get("juicy_params", 35),
-                host=re.sub(r"https?://([^/]+).*", r"\1", url),
+                host=_host_from_url(url),
                 url=url, title=f"Potential {pattern.upper()} surface",
                 description=f"URL matched gf pattern '{pattern}' — worth manual testing.",
                 tags=[pattern], raw={"pattern": pattern, "url": url},
@@ -147,6 +162,7 @@ def _gf_to_findings(gf_patterns: Dict[str, List[str]], weights: Dict) -> List[Fi
 
 
 def _ffuf_to_findings(ffuf_hits: List[Dict], weights: Dict) -> List[Finding]:
+    """prev-audit B-01 fix: convert ffuf directory hits into scored findings."""
     findings = []
     for i, h in enumerate(ffuf_hits):
         url    = h.get("url", "")
@@ -162,7 +178,7 @@ def _ffuf_to_findings(ffuf_hits: List[Dict], weights: Dict) -> List[Finding]:
             sev, score = "low", 20
         findings.append(Finding(
             id=f"ffuf_{i}", category="ffuf", severity=sev, score=score,
-            host=re.sub(r"https?://([^/]+).*", r"\1", url),
+            host=_host_from_url(url),
             url=url,
             title=f"Exposed path: {path or url}",
             description=f"ffuf hit — HTTP {status}, path: {path}",
@@ -173,18 +189,19 @@ def _ffuf_to_findings(ffuf_hits: List[Dict], weights: Dict) -> List[Finding]:
 
 
 def _secrets_to_findings(secret_hits: List[Dict], weights: Dict) -> List[Finding]:
+    """prev-audit B-02 fix: convert secret scanner hits into scored findings."""
     findings = []
     for i, s in enumerate(secret_hits):
-        stype = s.get("type", "Unknown Secret")
+        stype      = s.get("type", "Unknown Secret")
         sev, score = _SECRET_SEVERITY.get(stype, _SECRET_DEFAULT)
-        host  = re.sub(r"https?://([^/]+).*", r"\1", s.get("file", ""))
+        source     = s.get("file", s.get("source", ""))
         findings.append(Finding(
             id=f"secret_{i}", category="secret", severity=sev, score=score,
-            host=host,
-            url=s.get("file", ""),
+            host=_host_from_url(source),
+            url=source,
             title=f"Secret Exposed: {stype}",
-            description=f"Secret type '{stype}' found in {s.get('file', 'unknown file')}. "
-                        f"Snippet (redacted): {s.get('snippet', '')[:60]}",
+            description=(f"Type '{stype}' found in {source}. "
+                         f"Snippet (redacted): {s.get('match', '')[:60]}"),
             tags=["secret", "exposure", "critical-lead"],
             raw=s,
         ))
@@ -193,30 +210,30 @@ def _secrets_to_findings(secret_hits: List[Dict], weights: Dict) -> List[Finding
 
 def _nmap_to_findings(nmap_info: Dict, weights: Dict) -> List[Finding]:
     """
-    B-03 FIX: Convert nmap interesting port list into scored Finding objects.
-    nmap_info['interesting'] is List[Dict] from active_recon.py.
+    B-03 fix: score interesting open ports from nmap parsed output.
+    nmap_info['interesting'] is List[Dict] from interesting_ports().
     """
     findings = []
     interesting = nmap_info.get("interesting", [])
     if not isinstance(interesting, list):
         interesting = []
     for i, p in enumerate(interesting):
-        port  = p.get("port", 0)
-        label = p.get("label", str(port))
         risk  = p.get("risk", "medium")
         sev   = "high" if risk == "high" else "medium"
-        score = weights.get("exposed_service_high", 85) if risk == "high" else weights.get("exposed_service_med", 55)
+        score = weights.get("nuclei_high", 80) if risk == "high" else 55
+        port  = p.get("port", "?")
+        label = p.get("label", str(port))
+        ip    = p.get("ip", "")
+        ver   = p.get("version", "")
+        svc   = p.get("service", "")
         findings.append(Finding(
             id=f"nmap_{i}", category="open_port", severity=sev, score=score,
-            host=p.get("ip", ""),
-            url=f"{p.get('ip', '')}:{port}",
-            title=f"Exposed {label} on port {port}",
-            description=(
-                f"Port {port} ({label}) is open. "
-                f"Service: {p.get('service', '')} {p.get('version', '')}.strip(). "
-                f"Risk level: {risk}."
-            ),
-            tags=["nmap", "open-port", risk + "-risk"],
+            host=ip,
+            url=f"{ip}:{port}",
+            title=f"Exposed {label} (port {port})",
+            description=(f"Port {port} ({label}) open on {ip}. "
+                         f"Service: {svc} {ver}. Risk: {risk}."),
+            tags=["nmap", "open-port", label.lower().replace(" ", "-")],
             raw=p,
         ))
     return findings
@@ -239,7 +256,7 @@ def score_and_aggregate(
     config: dict,
     out_dir: Path,
 ) -> Dict[str, Any]:
-    weights = config.get("scoring", {})
+    weights      = config.get("scoring", {})
     all_findings: List[Finding] = []
 
     all_findings.extend(_nuclei_to_findings(vuln_results.get("nuclei_findings", []), weights))
@@ -252,16 +269,16 @@ def score_and_aggregate(
     all_findings = deduplicate(all_findings)
     all_findings.sort(key=lambda f: (-f.score, -SEVERITY_ORDER.get(f.severity, 0)))
 
-    by_severity = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    by_severity: Dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
     for f in all_findings:
         by_severity[f.severity] = by_severity.get(f.severity, 0) + 1
 
-    live_hosts       = active_results.get("live_hosts", [])
-    nmap_interesting = active_results.get("nmap", {}).get("interesting", [])
+    live_hosts   = active_results.get("live_hosts", [])
+    nmap_interesting: List[Dict] = active_results.get("nmap", {}).get("interesting", [])
     if not isinstance(nmap_interesting, list):
         nmap_interesting = []
 
-    domain_signals: Dict[str, Dict] = {}
+    domain_signals: Dict[str, Any] = {}
     for domain, data in passive_results.items():
         sub_count       = len(data.get("subdomains", []))
         domain_score    = min(sub_count // 5, 30)
@@ -269,22 +286,31 @@ def score_and_aggregate(
         for f in domain_findings:
             domain_score += f.score // 10
 
-        # B-06 FIX: boost score from nmap interesting ports belonging to this domain
-        for p in nmap_interesting:
-            if domain in p.get("ip", ""):
-                domain_score += 30 if p.get("risk") == "high" else 15
+        # B-06 fix: boost interest score from nmap open risky ports
+        for port_info in nmap_interesting:
+            ip = port_info.get("ip", "")
+            # rough correlation: if the IP was discovered under this domain
+            # (httpx gives us the URL host, not necessarily IP — best effort)
+            host_entry = next(
+                (h for h in live_hosts
+                 if domain in h.get("host", h.get("url", "")) and ip in h.get("url", "")), None
+            )
+            if host_entry or any(domain in h.get("url", "") for h in live_hosts):
+                risk = port_info.get("risk", "medium")
+                domain_score += 30 if risk == "high" else 15
 
         domain_signals[domain] = {
-            "subdomain_count":  sub_count,
-            "live_hosts":       sum(1 for h in live_hosts if domain in h.get("host", "")),
-            "findings_count":   len(domain_findings),
-            "interest_score":   domain_score,
-            "top_findings":     [f.to_dict() for f in domain_findings[:5]],
+            "subdomain_count": sub_count,
+            "live_hosts":      sum(1 for h in live_hosts
+                                   if domain in h.get("host", h.get("url", ""))),
+            "findings_count":  len(domain_findings),
+            "interest_score":  domain_score,
+            "top_findings":    [f.to_dict() for f in domain_findings[:5]],
         }
 
     def priority_label(score: int) -> str:
-        if score >= 70:  return "HIGH — Worth probing"
-        if score >= 40:  return "MEDIUM — Investigate"
+        if score >= 70: return "HIGH — Worth probing"
+        if score >= 40: return "MEDIUM — Investigate"
         return "LOW — Likely clean"
 
     for sig in domain_signals.values():
