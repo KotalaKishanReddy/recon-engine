@@ -1,18 +1,14 @@
 """
 passive_recon.py
-Runs all passive recon tools: subfinder, amass, crt.sh, theHarvester.
-Zero active connections to target hosts.
+Runs all passive recon tools against a list of apex domains.
+No active connections to targets — zero noise, zero legal risk.
 """
 import asyncio
 import json
 import re
+import aiohttp
 from pathlib import Path
 from typing import List, Dict, Any
-
-try:
-    import aiohttp
-except ImportError:
-    aiohttp = None
 
 
 async def run_tool(cmd: List[str], timeout: int = 300) -> str:
@@ -48,7 +44,7 @@ async def amass_passive(domain: str, out_dir: Path) -> List[str]:
     return []
 
 
-async def crtsh(domain: str, session) -> List[str]:
+async def crtsh(domain: str, session: aiohttp.ClientSession) -> List[str]:
     url = f"https://crt.sh/?q=%.{domain}&output=json"
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
@@ -56,9 +52,9 @@ async def crtsh(domain: str, session) -> List[str]:
             subs = set()
             for entry in data:
                 for name in entry.get("name_value", "").split("\n"):
-                    name = name.strip().lstrip("*.")
+                    name = name.strip().lstrip("*.").lower()
                     if domain in name:
-                        subs.add(name.lower())
+                        subs.add(name)
             return list(subs)
     except Exception:
         return []
@@ -68,7 +64,7 @@ async def theharvester(domain: str, out_dir: Path) -> Dict[str, Any]:
     out_base = out_dir / f"harvester_{domain}"
     await run_tool([
         "theHarvester", "-d", domain,
-        "-b", "anubis,crtsh,dnsdumpster,hackertarget,otx,rapiddns",
+        "-b", "anubis,crtsh,dnsdumpster,hackertarget,otx,rapiddns,sublist3r",
         "-f", str(out_base),
     ], timeout=120)
     json_file = Path(str(out_base) + ".json")
@@ -85,53 +81,44 @@ async def passive_recon_domain(domain: str, out_dir: Path, config: dict) -> Dict
     domain_dir.mkdir(parents=True, exist_ok=True)
     print(f"  [passive] Starting: {domain}")
 
-    if aiohttp:
-        connector = aiohttp.TCPConnector(ssl=False)
-        async with aiohttp.ClientSession(connector=connector) as session:
-            results = await asyncio.gather(
-                subfinder(domain, domain_dir),
-                amass_passive(domain, domain_dir),
-                crtsh(domain, session),
-                theharvester(domain, domain_dir),
-                return_exceptions=True,
-            )
-    else:
+    connector = aiohttp.TCPConnector(ssl=False)
+    async with aiohttp.ClientSession(connector=connector) as session:
         results = await asyncio.gather(
             subfinder(domain, domain_dir),
             amass_passive(domain, domain_dir),
-            asyncio.coroutine(lambda: [])(),
+            crtsh(domain, session),
             theharvester(domain, domain_dir),
             return_exceptions=True,
         )
 
-    sf_subs   = results[0] if not isinstance(results[0], Exception) else []
-    am_subs   = results[1] if not isinstance(results[1], Exception) else []
-    crt_subs  = results[2] if not isinstance(results[2], Exception) else []
-    harv_data = results[3] if not isinstance(results[3], Exception) else {}
+    subfinder_subs = results[0] if not isinstance(results[0], Exception) else []
+    amass_subs     = results[1] if not isinstance(results[1], Exception) else []
+    crtsh_subs     = results[2] if not isinstance(results[2], Exception) else []
+    harvester_data = results[3] if not isinstance(results[3], Exception) else {}
 
-    all_subs = set(sf_subs) | set(am_subs) | set(crt_subs)
-    if isinstance(harv_data, dict):
-        for h in harv_data.get("hosts", []):
+    all_subs = set(subfinder_subs) | set(amass_subs) | set(crtsh_subs)
+    if isinstance(harvester_data, dict):
+        for h in harvester_data.get("hosts", []):
             m = re.search(r"[\w\.\-]+\." + re.escape(domain), h)
             if m:
                 all_subs.add(m.group(0).lower())
 
-    emails    = harv_data.get("emails", []) if isinstance(harv_data, dict) else []
+    emails     = harvester_data.get("emails", []) if isinstance(harvester_data, dict) else []
     subdomains = sorted(all_subs)
     print(f"  [passive] {domain}: {len(subdomains)} subdomains, {len(emails)} emails")
 
     output = {
         "domain": domain, "subdomains": subdomains, "emails": emails,
-        "sources": {"subfinder": len(sf_subs), "amass": len(am_subs), "crtsh": len(crt_subs)},
+        "sources": {"subfinder": len(subfinder_subs), "amass": len(amass_subs), "crtsh": len(crtsh_subs)},
     }
     (domain_dir / "passive_results.json").write_text(json.dumps(output, indent=2))
     return output
 
 
 async def run_passive(domains: List[str], out_dir: Path, config: dict) -> Dict[str, Any]:
-    tasks = [passive_recon_domain(d, out_dir, config) for d in domains]
+    tasks   = [passive_recon_domain(d, out_dir, config) for d in domains]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    final = {}
+    final   = {}
     for domain, result in zip(domains, results):
         if isinstance(result, Exception):
             final[domain] = {"domain": domain, "error": str(result), "subdomains": [], "emails": []}

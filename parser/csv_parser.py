@@ -1,6 +1,6 @@
 """
 csv_parser.py
-Parses HackerOne / Bugcrowd scope CSV exports into normalized Target objects.
+Parses HackerOne / Bugcrowd scope CSV exports into normalized target objects.
 """
 import csv
 import re
@@ -8,7 +8,6 @@ import json
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional
-
 
 ASSET_TYPES = {
     "wildcard": r"^\*\.[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}$",
@@ -65,6 +64,8 @@ def _extract_apex(raw: str, asset_type: str) -> str:
     if asset_type == "url":
         match = re.search(r"https?://([^/?]+)", raw)
         return match.group(1) if match else raw
+    if asset_type in ("domain", "unknown"):
+        return raw
     return raw
 
 
@@ -75,7 +76,7 @@ def parse_csv(filepath: str) -> List[Target]:
 
     targets: List[Target] = []
     with open(path, newline="", encoding="utf-8-sig") as f:
-        reader  = csv.DictReader(f)
+        reader = csv.DictReader(f)
         headers = reader.fieldnames or []
 
         asset_col  = _find_col(headers, H1_ASSET_COL)
@@ -84,7 +85,9 @@ def parse_csv(filepath: str) -> List[Target]:
         instr_col  = _find_col(headers, H1_INSTR_COL)
 
         if not asset_col:
-            raise ValueError(f"Cannot find asset column. Headers: {headers}")
+            raise ValueError(
+                f"Cannot find asset column. Headers: {headers}\nExpected one of: {H1_ASSET_COL}"
+            )
 
         for i, row in enumerate(reader, start=2):
             raw = row.get(asset_col, "").strip()
@@ -114,10 +117,8 @@ def parse_csv(filepath: str) -> List[Target]:
 
             targets.append(Target(
                 raw=raw, asset_type=asset_type, apex_domain=apex,
-                eligible_for_bounty=eligible, notes=notes,
-                source_row=i, skip=skip,
+                eligible_for_bounty=eligible, notes=notes, source_row=i, skip=skip,
             ))
-
     return targets
 
 
@@ -128,13 +129,12 @@ def print_summary(targets: List[Target]):
     types    = {}
     for t in web_tgts:
         types[t.asset_type] = types.get(t.asset_type, 0) + 1
-
     print(f"\n{'─'*50}")
     print(f"  CSV Parse Summary")
     print(f"{'─'*50}")
-    print(f"  Total rows       : {total}")
+    print(f"  Total rows      : {total}")
     print(f"  Skipped (non-web): {skipped}")
-    print(f"  Web targets      : {len(web_tgts)}")
+    print(f"  Web targets     : {len(web_tgts)}")
     for t, c in sorted(types.items()):
         print(f"    {t:<12}: {c}")
     print(f"{'─'*50}\n")

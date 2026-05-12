@@ -1,6 +1,6 @@
 """
 vuln_scan.py
-Runs Nuclei, ParamSpider, and gf pattern matching.
+Nuclei, paramspider, gf pattern matching.
 """
 import asyncio
 import json
@@ -31,18 +31,19 @@ async def nuclei_scan(live_urls: List[str], out_dir: Path, tags: List[str]) -> L
     urls_file = out_dir / "nuclei_urls.txt"
     urls_file.write_text("\n".join(live_urls))
     out_file  = out_dir / "nuclei_output.jsonl"
+    tag_str   = ",".join(tags)
+
     await run_tool([
         "nuclei", "-l", str(urls_file), "-o", str(out_file), "-json",
-        "-tags", ",".join(tags),
-        "-severity", "critical,high,medium,low,info",
-        "-rate-limit", "50", "-bulk-size", "25",
-        "-concurrency", "10", "-timeout", "10", "-silent",
+        "-tags", tag_str, "-severity", "critical,high,medium,low,info",
+        "-rate-limit", "50", "-bulk-size", "25", "-concurrency", "10",
+        "-timeout", "10", "-silent",
     ], timeout=1800)
+
     findings = []
     if out_file.exists():
         for line in out_file.read_text().splitlines():
-            line = line.strip()
-            if line:
+            if line.strip():
                 try:
                     findings.append(json.loads(line))
                 except json.JSONDecodeError:
@@ -59,8 +60,7 @@ async def paramspider_crawl(domains: List[str], out_dir: Path) -> Dict[str, List
         out_file = params_dir / f"{domain}_params.txt"
         await run_tool(["paramspider", "-d", domain, "-o", str(out_file), "--quiet"], timeout=60)
         if out_file.exists():
-            lines = [l.strip() for l in out_file.read_text().splitlines() if l.strip()]
-            results[domain] = lines
+            results[domain] = [l.strip() for l in out_file.read_text().splitlines() if l.strip()]
     total = sum(len(v) for v in results.values())
     print(f"  [paramspider] {total} parameterized URLs across {len(domains)} domains")
     return results
@@ -71,14 +71,13 @@ async def gf_patterns(urls: List[str], out_dir: Path) -> Dict[str, List[str]]:
         return {}
     urls_file = out_dir / "gf_input.txt"
     urls_file.write_text("\n".join(urls))
-    patterns = ["xss", "sqli", "redirect", "rce", "lfi", "ssrf", "debug_logic", "idor", "img-traversal"]
-    results = {}
+    patterns  = ["xss", "sqli", "redirect", "rce", "lfi", "ssrf", "debug_logic", "idor", "img-traversal"]
+    results   = {}
     for pattern in patterns:
         try:
             proc = await asyncio.create_subprocess_shell(
                 f"cat {urls_file} | gf {pattern} 2>/dev/null",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
             matches = [l.strip() for l in stdout.decode().splitlines() if l.strip()]
@@ -92,9 +91,8 @@ async def gf_patterns(urls: List[str], out_dir: Path) -> Dict[str, List[str]]:
 
 
 async def run_vuln(active_results: Dict, passive_results: Dict, out_dir: Path, config: dict) -> Dict[str, Any]:
-    vuln_dir = out_dir / "vuln"
+    vuln_dir   = out_dir / "vuln"
     vuln_dir.mkdir(exist_ok=True)
-
     live_hosts = active_results.get("live_hosts", [])
     live_urls  = [h.get("url", "") for h in live_hosts if h.get("url")]
     domains    = list(passive_results.keys())
@@ -112,10 +110,11 @@ async def run_vuln(active_results: Dict, passive_results: Dict, out_dir: Path, c
     all_urls = list(dict.fromkeys(all_urls))
 
     gf_results = await gf_patterns(all_urls, vuln_dir)
-
     results = {
-        "nuclei_findings": nuclei_findings, "nuclei_count": len(nuclei_findings),
-        "param_urls": param_urls, "gf_patterns": gf_results,
+        "nuclei_findings": nuclei_findings,
+        "nuclei_count": len(nuclei_findings),
+        "param_urls": param_urls,
+        "gf_patterns": gf_results,
     }
     (vuln_dir / "vuln_results.json").write_text(json.dumps(results, indent=2, default=str))
     return results

@@ -31,18 +31,18 @@ async def httpx_probe(subdomains: List[str], out_dir: Path, rate: int = 150) -> 
     hosts_file = out_dir / "httpx_input.txt"
     hosts_file.write_text("\n".join(subdomains))
     out_file = out_dir / "httpx_output.jsonl"
+
     await run_tool([
         "httpx", "-l", str(hosts_file), "-o", str(out_file),
         "-json", "-title", "-tech-detect", "-status-code",
-        "-content-length", "-web-server",
-        "-follow-redirects", "-rate-limit", str(rate),
-        "-threads", "50", "-timeout", "10", "-silent",
+        "-content-length", "-web-server", "-follow-redirects",
+        "-rate-limit", str(rate), "-threads", "50", "-timeout", "10", "-silent",
     ], timeout=600)
+
     results = []
     if out_file.exists():
         for line in out_file.read_text().splitlines():
-            line = line.strip()
-            if line:
+            if line.strip():
                 try:
                     results.append(json.loads(line))
                 except json.JSONDecodeError:
@@ -71,8 +71,7 @@ async def wafw00f_check(live_urls: List[str], out_dir: Path) -> Dict[str, str]:
         if out and "__" not in out:
             try:
                 data = json.loads(out)
-                waf = data[0].get("firewall", "None") if data else "None"
-                results[url] = waf
+                results[url] = data[0].get("firewall", "None") if data else "None"
             except Exception:
                 results[url] = "Unknown"
     return results
@@ -87,10 +86,9 @@ async def gowitness_screenshots(live_urls: List[str], out_dir: Path) -> str:
     urls_file.write_text("\n".join(live_urls))
     await run_tool([
         "gowitness", "file", "-f", str(urls_file),
-        "--screenshot-path", str(ss_dir),
-        "--threads", "5", "--timeout", "10",
+        "--screenshot-path", str(ss_dir), "--threads", "5", "--timeout", "10",
     ], timeout=600)
-    print(f"  [gowitness] screenshots saved -> {ss_dir}")
+    print(f"  [gowitness] screenshots -> {ss_dir}")
     return str(ss_dir)
 
 
@@ -125,7 +123,6 @@ async def run_active(passive_results: Dict, out_dir: Path, config: dict, profile
         ss_dir = await gowitness_screenshots(live_urls, active_dir)
 
     nmap_info = await nmap_task
-
     results = {
         "total_subdomains_probed": len(all_subdomains),
         "live_hosts": httpx_results,
