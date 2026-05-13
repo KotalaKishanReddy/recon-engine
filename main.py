@@ -10,6 +10,8 @@ Fixes applied:
   B-08 (audit 2026-05-12): set_db_path(out_root) called after resolving output dir.
   N-04 (audit 2026-05-13): set_db_path() moved BEFORE the --history early-return
        so --history reads the correct DB regardless of --output flag.
+  MD-01 (2026-05-13): generate_markdown_report() called automatically after
+       generate_report() so every run produces both .html and .md outputs.
 """
 import argparse
 import asyncio
@@ -22,13 +24,13 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
-from parser.csv_parser      import parse_scope_csv
-from modules.passive        import run_passive
-from modules.active         import run_active
-from modules.vuln           import run_vuln_scan
-from aggregator             import score_and_aggregate
-from reporter               import generate_report
-from db                     import save_run, diff_findings, get_run_history, set_db_path
+from parser.csv_parser           import parse_scope_csv
+from modules.passive             import run_passive
+from modules.active              import run_active
+from modules.vuln                import run_vuln_scan
+from aggregator                  import score_and_aggregate
+from reporter                    import generate_report, generate_markdown_report
+from db                          import save_run, diff_findings, get_run_history, set_db_path
 
 BANNER = r"""
   ____                      _____             _
@@ -81,7 +83,6 @@ async def main():
     config = load_config(args.config)
 
     # N-04 fix: resolve output dir and call set_db_path() BEFORE --history check
-    # so --history always reads from the correct DB path (respects --output flag).
     out_root = Path(args.output) if args.output else Path(config.get("output_dir", "./output"))
     set_db_path(str(out_root))
 
@@ -100,7 +101,7 @@ async def main():
         parser.print_help()
         sys.exit(1)
 
-    # ── Setup ──────────────────────────────────────────────────────────────────
+    # ── Setup ───────────────────────────────────────────────────────────────────────────────
     run_id  = datetime.now().strftime("%Y%m%d_%H%M%S")
     profile = config["profiles"].get(args.profile, config["profiles"]["fast"])
     targets = parse_scope_csv(Path(args.csv))
@@ -118,25 +119,25 @@ async def main():
     print(f"[*] Output directory  : {run_dir}")
     print(f"[*] Run ID            : {run_id}\n")
 
-    # ── Phase 1: Passive ───────────────────────────────────────────────────────
+    # ── Phase 1: Passive ─────────────────────────────────────────────────────────────────
     print("[Phase 1/3] Passive Recon...")
     passive_results = await run_passive(domains, run_dir, config)
 
-    # ── Phase 2: Active ────────────────────────────────────────────────────────
+    # ── Phase 2: Active ──────────────────────────────────────────────────────────────────
     print("\n[Phase 2/3] Active Recon...")
     active_results = await run_active(passive_results, run_dir, config, profile)
 
-    # ── Phase 3: Vuln Scan ─────────────────────────────────────────────────────
+    # ── Phase 3: Vuln Scan ─────────────────────────────────────────────────────────────────
     print("\n[Phase 3/3] Vuln Scan...")
     vuln_results = await run_vuln_scan(passive_results, active_results, run_dir, config, profile)
 
-    # ── Aggregate + Diff ───────────────────────────────────────────────────────
+    # ── Aggregate + Diff ─────────────────────────────────────────────────────────────────
     print("\n[*] Aggregating & scoring...")
     aggregated             = score_and_aggregate(passive_results, active_results, vuln_results, config, run_dir)
     new_findings, findings_with_flags = diff_findings(run_id, aggregated.get("findings", []))
     aggregated["findings"] = findings_with_flags
 
-    # ── Save run to history DB ─────────────────────────────────────────────────
+    # ── Save run to history DB ───────────────────────────────────────────────────────────────
     save_run(run_id, args.profile, scope_hash(targets), {
         "total_findings": aggregated.get("total_findings", 0),
         "by_severity":    aggregated.get("by_severity", {}),
@@ -144,14 +145,22 @@ async def main():
         "live_hosts":     active_results.get("live_count", 0),
     })
 
-    # ── Generate Report ────────────────────────────────────────────────────────
-    print("[*] Generating report...")
+    # ── Generate Reports (HTML + Markdown) ──────────────────────────────────────────────────
+    print("[*] Generating reports...")
+
     report_path = generate_report(
         aggregated, passive_results, active_results, run_id, args.profile, run_dir
     )
 
+    # MD-01: auto-generate markdown report alongside HTML every run
+    md_path = generate_markdown_report(
+        aggregated, passive_results, active_results, vuln_results,
+        run_id, args.profile, run_dir
+    )
+
     print_summary(aggregated, new_findings, run_id, run_dir)
-    print(f"  \U0001f4c4 Report  : {report_path}")
+    print(f"  \U0001f4c4 HTML Report : {report_path}")
+    print(f"  \U0001f4dd MD Report   : {md_path}")
 
     if new_findings:
         print(f"\n  \U0001f6a8 {len(new_findings)} NEW findings since last run:")
