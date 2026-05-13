@@ -2,14 +2,17 @@
 active_recon.py
 Probes live hosts: httpx, nmap, wafw00f, gowitness screenshots.
 
-Fixes applied (audit 2026-05-12):
-  B-03: nmap XML parsed after scan; interesting ports stored in active_results.
-  B-10: wafw00f writes to temp file instead of -o - stdout (not universally supported).
+Fixes applied:
+  B-03 (audit 2026-05-12): nmap XML parsed; interesting ports stored.
+  B-10 (audit 2026-05-12): wafw00f writes to temp file.
+  N-01 (audit 2026-05-13): strip duplicate --open from nmap flags.
+  N-02 (audit 2026-05-13): hostname extraction uses urllib.parse (no colon artifact).
 """
 import asyncio
 import json
 import os
 import tempfile
+import urllib.parse as _up
 from pathlib import Path
 from typing import List, Dict, Any
 
@@ -63,8 +66,10 @@ async def nmap_scan(hosts: List[str], out_dir: Path, top_ports: int = 1000, flag
     hosts_file = out_dir / "nmap_input.txt"
     hosts_file.write_text("\n".join(hosts[:50]))
     out_xml = out_dir / "nmap_output.xml"
+    # N-01 fix: strip --open from flags before splitting to avoid duplicate flag
+    clean_flags = [f for f in flags.split() if f != "--open"]
     cmd = ["nmap", "-iL", str(hosts_file), "--top-ports", str(top_ports),
-           "-oX", str(out_xml), "--open", "-T4"] + flags.split()
+           "-oX", str(out_xml), "--open", "-T4"] + clean_flags
     await run_tool(cmd, timeout=600)
     print(f"  [nmap] scan complete -> {out_xml}")
     return {"xml_file": str(out_xml), "hosts_scanned": len(hosts[:50])}
@@ -122,12 +127,16 @@ async def run_active(passive_results: Dict, out_dir: Path, config: dict, profile
     all_subdomains = list(dict.fromkeys(all_subdomains))
 
     httpx_results = await httpx_probe(all_subdomains, active_dir, rate=profile.get("rate_limit", 150))
-    live_urls  = [h.get("url", "") for h in httpx_results if h.get("url")]
-    live_hosts = [
-        h.get("host",
-              h.get("url", "").replace("https://", "").replace("http://", "").split("/")[0])
-        for h in httpx_results
-    ]
+    live_urls = [h.get("url", "") for h in httpx_results if h.get("url")]
+
+    # N-02 fix: use urllib.parse for clean hostname extraction — no colon artifacts
+    live_hosts: List[str] = []
+    for h in httpx_results:
+        raw = h.get("host") or h.get("url", "")
+        parsed   = _up.urlparse(raw if raw.startswith("http") else "http://" + raw)
+        hostname = parsed.hostname or parsed.netloc.split(":")[0]
+        if hostname:
+            live_hosts.append(hostname)
 
     nmap_task = asyncio.create_task(
         nmap_scan(live_hosts, active_dir,
@@ -150,21 +159,21 @@ async def run_active(passive_results: Dict, out_dir: Path, config: dict, profile
         try:
             from modules.utils.nmap_parser import parse_nmap_xml, interesting_ports
             nmap_parsed      = parse_nmap_xml(xml_path)
-            nmap_interesting = interesting_ports(nmap_parsed)  # returns List[Dict]
+            nmap_interesting = interesting_ports(nmap_parsed)
             print(f"  [nmap-parser] {len(nmap_interesting)} interesting port(s) across "
                   f"{len(nmap_parsed)} host(s)")
         except Exception as e:
             print(f"  [nmap-parser] skipped — {e}")
 
     nmap_info["parsed_hosts"] = nmap_parsed
-    nmap_info["interesting"]  = nmap_interesting   # always List[Dict]
+    nmap_info["interesting"]  = nmap_interesting
 
     results: Dict[str, Any] = {
         "total_subdomains_probed": len(all_subdomains),
-        "live_hosts":    httpx_results,
-        "live_count":    len(httpx_results),
-        "waf_detection": waf_results,
-        "nmap":          nmap_info,
+        "live_hosts":      httpx_results,
+        "live_count":      len(httpx_results),
+        "waf_detection":   waf_results,
+        "nmap":            nmap_info,
         "screenshots_dir": ss_dir,
     }
     (active_dir / "active_results.json").write_text(json.dumps(results, indent=2, default=str))

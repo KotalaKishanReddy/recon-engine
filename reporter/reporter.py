@@ -1,6 +1,11 @@
 """
 reporter.py
 Generates a self-contained dark-mode HTML dashboard from aggregated results.
+
+Fix applied:
+  N-03 (audit 2026-05-13): escape { and } in all user-derived strings before
+       passing to str.format() — prevents KeyError when findings contain
+       curly braces (JWT payloads, GraphQL queries, JSON in titles/URLs).
 """
 import json
 import re
@@ -9,12 +14,22 @@ from datetime import datetime
 from typing import Dict, Any
 
 
+def _safe(s: str) -> str:
+    """N-03 fix: escape { } so .format() won't treat them as placeholders."""
+    return str(s).replace("{", "&#123;").replace("}", "&#125;")
+
+
+def _safe_url(u: str) -> str:
+    """Percent-encode braces in URLs (safe for href attributes)."""
+    return str(u).replace("{", "%7B").replace("}", "%7D")
+
+
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ReconEngine Report — {run_id}</title>
+<title>ReconEngine Report &#8212; {run_id}</title>
 <link href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700&display=swap" rel="stylesheet">
 <style>
 :root{{
@@ -154,14 +169,14 @@ def _domain_cards(domain_signals):
         sub_count  = sig.get("subdomain_count", 0)
         live       = sig.get("live_hosts", 0)
         findings_n = sig.get("findings_count", 0)
-        priority   = sig.get("priority", "LOW")
+        priority   = _safe(sig.get("priority", "LOW"))
         mini = "".join(
-            f'<div class="mf-row"><span class="pill {f.get("severity","info")}">{f.get("severity","info")}</span>{f.get("title","")[:55]}</div>'
+            f'<div class="mf-row"><span class="pill {f.get("severity","info")}">{f.get("severity","info")}</span>{_safe(f.get("title",""))[:55]}</div>'
             for f in sig.get("top_findings", [])[:3]
         )
         cards.append(f"""
 <div class="dc">
-  <div class="dc-head"><div class="dc-name">{domain}</div><div class="dc-badge">{priority}</div></div>
+  <div class="dc-head"><div class="dc-name">{_safe(domain)}</div><div class="dc-badge">{priority}</div></div>
   <div class="dc-stats">
     <div class="st"><div class="st-v">{sub_count}</div><div class="st-l">Subdomains</div></div>
     <div class="st"><div class="st-v">{live}</div><div class="st-l">Live</div></div>
@@ -177,11 +192,12 @@ def _findings_rows(findings):
     for i, f in enumerate(findings, 1):
         sev   = f.get("severity", "info")
         score = f.get("score", 0)
-        host  = f.get("host", "")[:50]
-        url   = f.get("url", "")
-        title = f.get("title", "")[:80]
-        cat   = f.get("category", "")
-        tags  = "".join(f'<span class="tag">{t}</span>' for t in f.get("tags", [])[:5])
+        # N-03 fix: escape { } in all user-derived fields before embedding in HTML template
+        host  = _safe(f.get("host", ""))[:50]
+        title = _safe(f.get("title", ""))[:80]
+        url   = _safe_url(f.get("url", ""))
+        cat   = _safe(f.get("category", ""))
+        tags  = "".join(f'<span class="tag">{_safe(t)}</span>' for t in f.get("tags", [])[:5])
         color = _sev_color(sev)
         pct   = min(score, 100)
         us    = url[:60] + ("..." if len(url) > 60 else "")
@@ -205,6 +221,8 @@ def generate_report(aggregated, passive_results, active_results, run_id, profile
     domain_signals = aggregated.get("domain_signals", {})
     total_subs     = sum(len(d.get("subdomains", [])) for d in passive_results.values())
 
+    # N-03 fix: _domain_cards and _findings_rows now call _safe() internally;
+    # static numeric values need no escaping.
     html = HTML_TEMPLATE.format(
         run_id=run_id,
         timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),

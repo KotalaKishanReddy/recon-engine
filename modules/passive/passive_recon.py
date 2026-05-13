@@ -3,9 +3,10 @@ passive_recon.py
 Runs all passive recon tools against a list of apex domains.
 No active connections to targets — zero noise, zero legal risk.
 
-Fix applied (audit 2026-05-12):
-  B-05: asyncio.Semaphore bounds concurrency so we don't fire all domains
-        simultaneously and hammer DNS resolvers into rate-limiting us.
+Fixes applied:
+  B-05 (audit 2026-05-12): asyncio.Semaphore bounds concurrency.
+  N-07 (audit 2026-05-13): crtsh() surfaces HTTP 429 rate-limit in logs
+       instead of silently swallowing it in a bare except.
 """
 import asyncio
 import json
@@ -49,9 +50,16 @@ async def amass_passive(domain: str, out_dir: Path) -> List[str]:
 
 
 async def crtsh(domain: str, session: aiohttp.ClientSession) -> List[str]:
+    """N-07 fix: explicitly handle 429 and non-200 before parsing JSON."""
     url = f"https://crt.sh/?q=%.{domain}&output=json"
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            if resp.status == 429:
+                print(f"  [crtsh] rate-limited on {domain} (429) — results may be incomplete")
+                return []
+            if resp.status != 200:
+                print(f"  [crtsh] non-200 ({resp.status}) for {domain}")
+                return []
             data = await resp.json(content_type=None)
             subs = set()
             for entry in data:
@@ -60,7 +68,8 @@ async def crtsh(domain: str, session: aiohttp.ClientSession) -> List[str]:
                     if domain in name:
                         subs.add(name)
             return list(subs)
-    except Exception:
+    except Exception as e:
+        print(f"  [crtsh] error on {domain}: {e}")
         return []
 
 
@@ -124,8 +133,7 @@ async def passive_recon_domain(domain: str, out_dir: Path, config: dict) -> Dict
 
 
 async def run_passive(domains: List[str], out_dir: Path, config: dict) -> Dict[str, Any]:
-    # B-05 fix: bound concurrency so we don't fire all domains simultaneously
-    # and get DNS rate-limited. Default 5, configurable in config.yaml.
+    # B-05 fix: bound concurrency to avoid hammering DNS resolvers
     concurrency = config.get("passive_concurrency", 5)
     sem = asyncio.Semaphore(concurrency)
 

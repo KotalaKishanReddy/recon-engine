@@ -6,9 +6,10 @@ Usage:
     python main.py --csv scope.csv --profile stealth
     python main.py --history          # show last 10 runs
 
-Fix applied (audit 2026-05-12):
-  B-08 residual: set_db_path(out_root) called after resolving output dir
-                 so recon_history.db lives next to all run output folders.
+Fixes applied:
+  B-08 (audit 2026-05-12): set_db_path(out_root) called after resolving output dir.
+  N-04 (audit 2026-05-13): set_db_path() moved BEFORE the --history early-return
+       so --history reads the correct DB regardless of --output flag.
 """
 import argparse
 import asyncio
@@ -21,7 +22,7 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
-from parser.csv_parser      import parse_scope_csv        # B-01 fix: correct name
+from parser.csv_parser      import parse_scope_csv
 from modules.passive        import run_passive
 from modules.active         import run_active
 from modules.vuln           import run_vuln_scan
@@ -77,7 +78,13 @@ async def main():
     parser.add_argument("--history", action="store_true",   help="Show last 10 run history")
     args = parser.parse_args()
 
-    # B-04 (prev) + B-08: --history must not require config.yaml
+    config = load_config(args.config)
+
+    # N-04 fix: resolve output dir and call set_db_path() BEFORE --history check
+    # so --history always reads from the correct DB path (respects --output flag).
+    out_root = Path(args.output) if args.output else Path(config.get("output_dir", "./output"))
+    set_db_path(str(out_root))
+
     if args.history:
         rows = get_run_history(10)
         if not rows:
@@ -89,8 +96,6 @@ async def main():
                   f"critical={s.get('by_severity', {}).get('critical', 0)}")
         return
 
-    config = load_config(args.config)
-
     if not args.csv:
         parser.print_help()
         sys.exit(1)
@@ -98,19 +103,15 @@ async def main():
     # ── Setup ──────────────────────────────────────────────────────────────────
     run_id  = datetime.now().strftime("%Y%m%d_%H%M%S")
     profile = config["profiles"].get(args.profile, config["profiles"]["fast"])
-    targets = parse_scope_csv(Path(args.csv))   # B-01 fix: correct function + Path arg
+    targets = parse_scope_csv(Path(args.csv))
     domains = targets.get("domains", [])
 
     if not domains:
         print("[!] No valid in-scope domains found in CSV. Check format.")
         sys.exit(1)
 
-    out_root = Path(args.output) if args.output else Path(config.get("output_dir", "./output"))
-    run_dir  = out_root / run_id
+    run_dir = out_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-
-    # B-08 fix: point DB to the resolved output root
-    set_db_path(str(out_root))
 
     print(f"[*] Domains in scope  : {domains}")
     print(f"[*] Profile           : {args.profile}")
@@ -131,7 +132,7 @@ async def main():
 
     # ── Aggregate + Diff ───────────────────────────────────────────────────────
     print("\n[*] Aggregating & scoring...")
-    aggregated            = score_and_aggregate(passive_results, active_results, vuln_results, config, run_dir)
+    aggregated             = score_and_aggregate(passive_results, active_results, vuln_results, config, run_dir)
     new_findings, findings_with_flags = diff_findings(run_id, aggregated.get("findings", []))
     aggregated["findings"] = findings_with_flags
 
