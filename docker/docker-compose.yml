@@ -1,4 +1,4 @@
-version: "3.9"
+version: '3.8'
 
 services:
   recon-engine:
@@ -6,22 +6,9 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     image: recon-engine:latest
-    container_name: recon-engine
     volumes:
       - ../output:/app/output
-      - ../config.yaml:/app/config.yaml
-    environment:
-      - SHODAN_API_KEY=${SHODAN_API_KEY:-}
-      - SECURITYTRAILS_KEY=${SECURITYTRAILS_KEY:-}
-    stdin_open: true
-    tty: true
+      - ../scopes:/app/scopes
     # Usage:
-    # docker compose run recon-engine --csv /app/output/scope.csv --profile deep
-
-  nuclei:
-    image: projectdiscovery/nuclei:latest
-    container_name: nuclei-standalone
-    volumes:
-      - ../output:/output
-    entrypoint: ["nuclei"]
-    profiles: ["nuclei-only"]
+    #   docker compose -f docker/docker-compose.yml run --rm recon-engine --csv /app/scopes/scope.csv --profile fast
+    entrypoint: ["python3", "main.py"]
