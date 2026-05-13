@@ -118,3 +118,8 @@ scoring:
   juicy_params: 35
   nmap_high_risk_port: 55
   nmap_medium_risk_port: 30
+  # C-08: priority label thresholds — tune without touching scorer.py
+  # Findings with interest_score >= high_threshold are marked HIGH (worth probing).
+  # Findings with interest_score >= medium_threshold are marked MEDIUM.
+  priority_high_threshold: 70
+  priority_medium_threshold: 40

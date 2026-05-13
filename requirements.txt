@@ -1,10 +1,12 @@
-aiohttp>=3.9.0
-pyyaml>=6.0
-theHarvester>=4.6.0
-paramspider>=2.0
-wafw00f>=2.2.0
-python-nmap>=0.7.1
-jinja2>=3.1.0
-requests>=2.31.0
-dnspython>=2.4.0
-colorama>=0.4.6
+# C-07: all versions pinned to exact known-good releases.
+# Update deliberately after testing — do not loosen to >= ranges.
+aiohttp==3.9.5
+pyyaml==6.0.1
+theHarvester==4.6.0
+paramspider==2.0.0
+wafw00f==2.2.0
+python-nmap==0.7.1
+jinja2==3.1.4
+requests==2.31.0
+dnspython==2.6.1
+colorama==0.4.6

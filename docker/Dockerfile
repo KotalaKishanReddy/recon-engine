@@ -1,6 +1,11 @@
 # ReconEngine Docker Image
 # Base: Kali Linux Rolling
 # Includes: Go tools + Python tools + nmap + amass
+#
+# LAYER ORDER WARNING:
+#   - pip install runs BEFORE 'COPY . /app' intentionally for Docker cache.
+#   - Do NOT move 'COPY . /app' above the pip install step or you will
+#     bust the cache on every code change and reinstall all deps every build.
 
 FROM kalilinux/kali-rolling
 
@@ -9,8 +14,10 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     golang-go git curl wget jq dnsutils ca-certificates \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# C-05 fix: quote PATH expansion so GOPATH/bin is correctly inherited
+# across all subsequent RUN layers in BuildKit.
 ENV GOPATH=/root/go
-ENV PATH=$PATH:/root/go/bin
+ENV PATH="${GOPATH}/bin:${PATH}"
 
 RUN go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
 RUN go install github.com/projectdiscovery/httpx/cmd/httpx@latest
@@ -32,6 +39,7 @@ RUN nuclei -update-templates -silent || true
 COPY requirements.txt /app/requirements.txt
 RUN pip3 install --no-cache-dir -r /app/requirements.txt
 
+# C-06: 'COPY . /app' is intentionally AFTER pip install — preserves cache.
 WORKDIR /app
 COPY . /app
 

@@ -2,11 +2,17 @@
 reporter.py
 Generates a self-contained dark-mode HTML dashboard from aggregated results.
 
-Fix applied:
-  N-03 (audit 2026-05-13): escape { and } in all user-derived strings before
-       passing to str.format() — prevents KeyError when findings contain
-       curly braces (JWT payloads, GraphQL queries, JSON in titles/URLs).
+Fixes applied:
+  N-03 (audit 2026-05-13): escape {{ and }} in user-derived strings before
+       passing to str.format().
+  C-03 (audit 2026-05-13): live_count sourced from
+       len(active_results.get('live_hosts', [])) — the key 'live_count'
+       does not exist; active_recon stores the list under 'live_hosts'.
+  C-04 (audit 2026-05-13): href and title attributes in _findings_rows()
+       now use html.escape(url, quote=True) to prevent HTML attribute
+       injection / reflected XSS from malicious URLs in findings.
 """
+import html as _html
 import json
 import re
 from pathlib import Path
@@ -19,9 +25,9 @@ def _safe(s: str) -> str:
     return str(s).replace("{", "&#123;").replace("}", "&#125;")
 
 
-def _safe_url(u: str) -> str:
-    """Percent-encode braces in URLs (safe for href attributes)."""
-    return str(u).replace("{", "%7B").replace("}", "%7D")
+def _safe_attr(u: str) -> str:
+    """C-04 fix: full HTML-attribute escaping for href/title values."""
+    return _html.escape(str(u), quote=True)
 
 
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -192,22 +198,23 @@ def _findings_rows(findings):
     for i, f in enumerate(findings, 1):
         sev   = f.get("severity", "info")
         score = f.get("score", 0)
-        # N-03 fix: escape { } in all user-derived fields before embedding in HTML template
         host  = _safe(f.get("host", ""))[:50]
         title = _safe(f.get("title", ""))[:80]
-        url   = _safe_url(f.get("url", ""))
+        # C-04 fix: full HTML-attribute escaping prevents XSS from malicious URLs
+        url_raw  = str(f.get("url", ""))
+        url_attr = _safe_attr(url_raw)          # safe for href= and title=
+        url_disp = _safe(url_raw[:60] + ("..." if len(url_raw) > 60 else ""))
         cat   = _safe(f.get("category", ""))
         tags  = "".join(f'<span class="tag">{_safe(t)}</span>' for t in f.get("tags", [])[:5])
         color = _sev_color(sev)
         pct   = min(score, 100)
-        us    = url[:60] + ("..." if len(url) > 60 else "")
         rows.append(f"""
 <tr class="fr" data-sev="{sev}">
   <td style="color:var(--faint);font-size:11px">{i}</td>
   <td><span class="pill {sev}">{sev}</span></td>
   <td><div class="sb"><span class="sn" style="color:{color}">{score}</span><div class="st-tr"><div class="sf" data-w="{pct}" style="background:{color}"></div></div></div></td>
   <td style="font-family:monospace;font-size:12px;color:var(--muted)">{host}</td>
-  <td><a href="{url}" target="_blank" rel="noopener" class="uc" title="{url}">{us}</a></td>
+  <td><a href="{url_attr}" target="_blank" rel="noopener" class="uc" title="{url_attr}">{url_disp}</a></td>
   <td>{title}</td>
   <td style="font-size:11px;color:var(--faint)">{cat}</td>
   <td><div class="tags">{tags}</div></td>
@@ -221,15 +228,16 @@ def generate_report(aggregated, passive_results, active_results, run_id, profile
     domain_signals = aggregated.get("domain_signals", {})
     total_subs     = sum(len(d.get("subdomains", [])) for d in passive_results.values())
 
-    # N-03 fix: _domain_cards and _findings_rows now call _safe() internally;
-    # static numeric values need no escaping.
+    # C-03 fix: active_recon stores the list under 'live_hosts', not 'live_count'
+    live_count = len(active_results.get("live_hosts", []))
+
     html = HTML_TEMPLATE.format(
         run_id=run_id,
         timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         profile=profile_name,
         total_domains=len(passive_results),
         total_subdomains=total_subs,
-        live_count=active_results.get("live_count", 0),
+        live_count=live_count,
         sev_critical=by_sev.get("critical", 0),
         sev_high=by_sev.get("high", 0),
         sev_medium=by_sev.get("medium", 0),
