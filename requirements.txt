@@ -1,11 +1,11 @@
 # Python dependencies for ReconEngine
 # theHarvester — NOT on PyPI. Pre-installed in Docker via apt (theharvester).
-# paramspider  — install from GitHub directly (no stable PyPI release).
-aiohttp==3.9.5
-pyyaml==6.0.1
+# paramspider  — installed from GitHub source in Dockerfile.
+aiohttp==3.11.14
+pyyaml==6.0.2
 wafw00f==2.2.0
 python-nmap==0.7.1
 jinja2==3.1.4
-requests==2.31.0
-dnspython==2.6.1
+requests==2.32.3
+dnspython==2.7.0
 colorama==0.4.6

@@ -1,17 +1,17 @@
 # ReconEngine Docker Image
 # Base: Kali Linux Rolling
-# Includes: all Go tools + Python deps + nmap + amass + paramspider + theharvester
-#
 # Build:  docker build -t recon-engine -f docker/Dockerfile .
-# Run:    docker run --rm -v $(pwd)/output:/app/output recon-engine --csv /app/scope.csv --profile fast
+# Run:    docker run --rm -v $(pwd)/output:/app/output -v $(pwd)/scopes:/app/scopes \
+#           recon-engine --csv /app/scopes/scope.csv --profile fast
 
 FROM kalilinux/kali-rolling
 
-# System packages
+# System packages incl. gcc for aiohttp C extensions
 RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     nmap amass whatweb theharvester \
     python3 python3-pip python3-venv \
     golang-go git curl wget jq dnsutils ca-certificates \
+    gcc python3-dev \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Go environment
@@ -44,11 +44,11 @@ RUN git clone https://github.com/devanshbatham/paramspider /tmp/paramspider \
 # Nuclei templates
 RUN nuclei -update-templates -silent || true
 
-# Python deps — installed before COPY to preserve Docker layer cache
+# Python deps (after gcc is available so aiohttp compiles cleanly)
 COPY requirements.txt /app/requirements.txt
 RUN pip3 install --break-system-packages --no-cache-dir -r /app/requirements.txt
 
-# Copy source last (cache-friendly)
+# Copy source last (preserves Docker layer cache on code changes)
 WORKDIR /app
 COPY . /app
 
