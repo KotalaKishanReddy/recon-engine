@@ -1,8 +1,8 @@
-# C-07: all versions pinned to exact known-good releases.
-# Update deliberately after testing — do not loosen to >= ranges.
+# Python dependencies for ReconEngine
+# theHarvester is a standalone CLI tool — install separately:
+#   sudo apt install theharvester  OR  git clone https://github.com/laramies/theHarvester
 aiohttp==3.9.5
 pyyaml==6.0.1
-theHarvester==4.6.0
 paramspider==2.0.0
 wafw00f==2.2.0
 python-nmap==0.7.1
