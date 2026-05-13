@@ -38,15 +38,22 @@ RUN mkdir -p /root/.gf \
 
 # paramspider — install from source (no stable PyPI release)
 RUN git clone https://github.com/devanshbatham/paramspider /tmp/paramspider \
-    && pip3 install /tmp/paramspider --break-system-packages --no-cache-dir -q \
+    && pip3 install /tmp/paramspider \
+       --break-system-packages --ignore-installed --no-cache-dir -q \
     && rm -rf /tmp/paramspider
 
 # Nuclei templates
 RUN nuclei -update-templates -silent || true
 
-# Python deps (after gcc is available so aiohttp compiles cleanly)
+# Python deps
+# --break-system-packages : allow pip to install into system Python
+# --ignore-installed      : skip packages already managed by apt (requests, etc)
 COPY requirements.txt /app/requirements.txt
-RUN pip3 install --break-system-packages --no-cache-dir -r /app/requirements.txt
+RUN pip3 install \
+    --break-system-packages \
+    --ignore-installed \
+    --no-cache-dir \
+    -r /app/requirements.txt
 
 # Copy source last (preserves Docker layer cache on code changes)
 WORKDIR /app
