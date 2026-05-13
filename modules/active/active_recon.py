@@ -1,12 +1,18 @@
 """
 active_recon.py
-Probes live hosts: httpx, nmap, wafw00f, gowitness screenshots.
+Probes live hosts: puredns DNS pre-filter → httpx → nmap → wafw00f → gowitness.
 
 Fixes applied:
   B-03 (audit 2026-05-12): nmap XML parsed; interesting ports stored.
   B-10 (audit 2026-05-12): wafw00f writes to temp file.
   N-01 (audit 2026-05-13): strip duplicate --open from nmap flags.
   N-02 (audit 2026-05-13): hostname extraction uses urllib.parse (no colon artifact).
+  DNS-01 (2026-05-13): puredns DNS pre-filter stage added before httpx so WAF-blocked
+         or non-resolving subdomains never enter the HTTP probe queue. Falls back to
+         all subdomains if puredns is not installed.
+  HTTP-01 (2026-05-13): httpx flags hardened — random-agent, retries 2, lower thread
+          count (10), explicit per-request timeout (15s), follow-redirects, to evade
+          WAF fingerprinting and avoid resolver exhaustion on large GCP infra.
 """
 import asyncio
 import json
@@ -15,6 +21,22 @@ import tempfile
 import urllib.parse as _up
 from pathlib import Path
 from typing import List, Dict, Any
+
+
+# ── Bundled fallback resolver list (Quad9 + CF + Google alternates) ──────────
+# Written to disk on first run if no resolvers.txt exists in the run directory.
+FALLBACK_RESOLVERS = """
+9.9.9.9
+149.112.112.112
+1.1.1.1
+1.0.0.1
+8.8.8.8
+8.8.4.4
+208.67.222.222
+208.67.220.220
+64.6.64.6
+64.6.65.6
+""".strip()
 
 
 async def run_tool(cmd: List[str], timeout: int = 300) -> str:
@@ -34,19 +56,92 @@ async def run_tool(cmd: List[str], timeout: int = 300) -> str:
         return f"__ERROR__:{e}"
 
 
-async def httpx_probe(subdomains: List[str], out_dir: Path, rate: int = 150) -> List[Dict]:
+# ── DNS-01: puredns pre-filter ───────────────────────────────────────────────
+
+async def dns_resolve(subdomains: List[str], out_dir: Path) -> List[str]:
+    """
+    DNS-01 fix: run puredns to validate which subdomains actually resolve
+    before feeding anything to httpx.  This eliminates the "440 subs → 0 live"
+    failure caused by bulk DNS queries against rate-limiting public resolvers.
+
+    Falls back silently to the full list if puredns is not installed.
+    """
+    if not subdomains:
+        return []
+
+    # Write resolvers file if it doesn't exist
+    resolvers_file = out_dir / "resolvers.txt"
+    if not resolvers_file.exists():
+        resolvers_file.write_text(FALLBACK_RESOLVERS)
+
+    input_file    = out_dir / "dns_input.txt"
+    resolved_file = out_dir / "dns_resolved.txt"
+    input_file.write_text("\n".join(subdomains))
+
+    result = await run_tool(
+        [
+            "puredns", "resolve", str(input_file),
+            "-r", str(resolvers_file),
+            "-w", str(resolved_file),
+            "--rate-limit", "500",        # 500 DNS qps — safe for public resolvers
+            "--rate-limit-trusted", "5000",
+        ],
+        timeout=600,
+    )
+
+    if result.startswith("__TOOL_NOT_FOUND__"):
+        print("  [dns-filter] puredns not found — skipping DNS pre-filter (install: go install github.com/d3mondev/puredns/v2@latest)")
+        return subdomains  # graceful fallback — don't break the pipeline
+
+    if resolved_file.exists():
+        resolved = [l.strip() for l in resolved_file.read_text().splitlines() if l.strip()]
+        print(f"  [dns-filter] {len(resolved)}/{len(subdomains)} subdomains resolved via puredns")
+        return resolved
+
+    print(f"  [dns-filter] puredns produced no output — falling back to full list")
+    return subdomains
+
+
+# ── HTTP-01: WAF-evasive httpx probe ─────────────────────────────────────────
+
+async def httpx_probe(subdomains: List[str], out_dir: Path, rate: int = 50) -> List[Dict]:
+    """
+    HTTP-01 fix: hardened httpx flags to evade WAF detection and handle
+    slow GCP load-balancer responses:
+      -random-agent     : randomises User-Agent per request
+      -retries 2        : retry twice before marking dead (handles transient WAF drops)
+      -threads 10       : low concurrency — avoids IP-level rate limiting
+      -timeout 15       : longer per-request timeout for slow GCP LBs
+      -rate-limit 50    : max 50 req/s (was 150 — too aggressive for WAF infra)
+      -follow-redirects : follow 301/302 chains (common on GCP ingress)
+    """
     if not subdomains:
         return []
     hosts_file = out_dir / "httpx_input.txt"
     hosts_file.write_text("\n".join(subdomains))
     out_file = out_dir / "httpx_output.jsonl"
 
+    # Clamp rate to 50 if caller passes a higher value — safety guard for WAF infra
+    safe_rate = min(rate, 50)
+
     await run_tool([
-        "httpx", "-l", str(hosts_file), "-o", str(out_file),
-        "-json", "-title", "-tech-detect", "-status-code",
-        "-content-length", "-web-server", "-follow-redirects",
-        "-rate-limit", str(rate), "-threads", "50", "-timeout", "10", "-silent",
-    ], timeout=600)
+        "httpx",
+        "-l",              str(hosts_file),
+        "-o",              str(out_file),
+        "-json",
+        "-title",
+        "-tech-detect",
+        "-status-code",
+        "-content-length",
+        "-web-server",
+        "-follow-redirects",
+        "-random-agent",          # HTTP-01: WAF evasion
+        "-retries",        "2",   # HTTP-01: retry on drop
+        "-threads",        "10",  # HTTP-01: low concurrency
+        "-timeout",        "15",  # HTTP-01: slow LB tolerance
+        "-rate-limit",     str(safe_rate),
+        "-silent",
+    ], timeout=1200)
 
     results = []
     if out_file.exists():
@@ -126,13 +221,19 @@ async def run_active(passive_results: Dict, out_dir: Path, config: dict, profile
         all_subdomains.extend(subs)
     all_subdomains = list(dict.fromkeys(all_subdomains))
 
-    httpx_results = await httpx_probe(all_subdomains, active_dir, rate=profile.get("rate_limit", 150))
+    # DNS-01: pre-filter via puredns before HTTP probing
+    resolved_subdomains = await dns_resolve(all_subdomains, active_dir)
+
+    httpx_results = await httpx_probe(
+        resolved_subdomains, active_dir,
+        rate=profile.get("rate_limit", 50),  # HTTP-01: default 50, not 150
+    )
     live_urls = [h.get("url", "") for h in httpx_results if h.get("url")]
 
     # N-02 fix: use urllib.parse for clean hostname extraction — no colon artifacts
     live_hosts: List[str] = []
     for h in httpx_results:
-        raw = h.get("host") or h.get("url", "")
+        raw      = h.get("host") or h.get("url", "")
         parsed   = _up.urlparse(raw if raw.startswith("http") else "http://" + raw)
         hostname = parsed.hostname or parsed.netloc.split(":")[0]
         if hostname:
@@ -170,6 +271,7 @@ async def run_active(passive_results: Dict, out_dir: Path, config: dict, profile
 
     results: Dict[str, Any] = {
         "total_subdomains_probed": len(all_subdomains),
+        "dns_resolved":    len(resolved_subdomains),
         "live_hosts":      httpx_results,
         "live_count":      len(httpx_results),
         "waf_detection":   waf_results,

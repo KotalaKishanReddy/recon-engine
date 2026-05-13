@@ -11,6 +11,7 @@ tools:
   wafw00f: wafw00f
   whatweb: whatweb
   paramspider: paramspider
+  puredns: puredns   # DNS-01: add puredns to tool list
 
 api_keys:
   shodan: ""
@@ -28,12 +29,12 @@ profiles:
     vuln: false
     screenshots: false
     threads: 20
-    rate_limit: 150
+    rate_limit: 50        # HTTP-01: was 150 — lowered to 50 for WAF evasion
     # per-phase hard timeouts (seconds)
-    passive_timeout: 600       # 10 min total for all passive tasks
-    per_domain_timeout: 240    # 4 min per domain (subfinder+amass+crt.sh)
-    active_timeout: 900        # 15 min total active phase
-    vuln_timeout: 1800         # 30 min total vuln phase (skipped in fast)
+    passive_timeout: 600
+    per_domain_timeout: 240
+    active_timeout: 900
+    vuln_timeout: 1800
     subfinder_timeout: 120
     amass_timeout: 180
     httpx_timeout: 600
@@ -44,6 +45,7 @@ profiles:
     paramspider_timeout: 120
     wafw00f_timeout: 30
     gowitness_timeout: 600
+    dns_resolve_timeout: 300   # DNS-01: puredns pre-filter timeout
 
   deep:
     passive: true
@@ -51,11 +53,11 @@ profiles:
     vuln: true
     screenshots: true
     threads: 10
-    rate_limit: 50
-    passive_timeout: 1800      # 30 min
-    per_domain_timeout: 600    # 10 min per domain
-    active_timeout: 2400       # 40 min
-    vuln_timeout: 7200         # 2 hours
+    rate_limit: 30        # HTTP-01: was 50 — extra conservative for deep scans on large infra
+    passive_timeout: 1800
+    per_domain_timeout: 600
+    active_timeout: 2400
+    vuln_timeout: 7200
     subfinder_timeout: 300
     amass_timeout: 600
     httpx_timeout: 1200
@@ -66,6 +68,7 @@ profiles:
     paramspider_timeout: 240
     wafw00f_timeout: 30
     gowitness_timeout: 1200
+    dns_resolve_timeout: 600   # DNS-01: longer for 400+ subdomain lists
 
   stealth:
     passive: true
@@ -74,7 +77,7 @@ profiles:
     screenshots: false
     threads: 5
     rate_limit: 10
-    passive_timeout: 1200      # 20 min (slower tools)
+    passive_timeout: 1200
     per_domain_timeout: 480
     active_timeout: 0
     vuln_timeout: 0
@@ -88,6 +91,7 @@ profiles:
     paramspider_timeout: 180
     wafw00f_timeout: 0
     gowitness_timeout: 0
+    dns_resolve_timeout: 480
 
 default_profile: fast
 
@@ -118,8 +122,5 @@ scoring:
   juicy_params: 35
   nmap_high_risk_port: 55
   nmap_medium_risk_port: 30
-  # C-08: priority label thresholds — tune without touching scorer.py
-  # Findings with interest_score >= high_threshold are marked HIGH (worth probing).
-  # Findings with interest_score >= medium_threshold are marked MEDIUM.
   priority_high_threshold: 70
   priority_medium_threshold: 40
