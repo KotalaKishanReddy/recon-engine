@@ -8,6 +8,11 @@ Fixes applied:
   B-06 (audit 2026-05-12): domain_signals boosted by nmap interesting ports.
   N-05 (audit 2026-05-13): juicy_params bonus only applied when URL has a query
        string — prevents flat over-scoring of all GF findings.
+  A-02 (audit 2026-05-13): nmap→domain correlation uses httpx ip→domain map
+       instead of fragile 'domain in ip' substring match.
+  A-03 (audit 2026-05-13): priority_label() thresholds driven by config.yaml
+       scoring.priority_high_threshold / priority_medium_threshold (defaults
+       70 / 40 preserved).
 """
 import json
 import re
@@ -249,6 +254,24 @@ def deduplicate(findings: List[Finding]) -> List[Finding]:
     return unique
 
 
+def _build_ip_domain_map(live_hosts: List[Dict]) -> Dict[str, List[str]]:
+    """
+    A-02 fix: build {ip: [domain, ...]} from httpx results so nmap→domain
+    correlation uses actual resolved IPs, not substring matching.
+    httpx records contain 'host' (hostname) and optionally 'a' (resolved IPs).
+    """
+    ip_map: Dict[str, List[str]] = {}
+    for h in live_hosts:
+        hostname = h.get("host", "")
+        if not hostname:
+            continue
+        # httpx -json includes 'a' field with resolved IPv4 addresses
+        for ip in h.get("a", []):
+            if ip:
+                ip_map.setdefault(ip, []).append(hostname)
+    return ip_map
+
+
 def score_and_aggregate(
     passive_results: Dict,
     active_results:  Dict,
@@ -283,6 +306,18 @@ def score_and_aggregate(
                 tmp.append({**p, "ip": ip})
         nmap_interesting = tmp
 
+    # A-02 fix: use httpx-derived ip→domain map for safe nmap correlation
+    ip_domain_map = _build_ip_domain_map(live_hosts)
+
+    # A-03 fix: thresholds from config (defaults 70/40 preserved)
+    high_thresh = weights.get("priority_high_threshold",   70)
+    med_thresh  = weights.get("priority_medium_threshold", 40)
+
+    def priority_label(score: int) -> str:
+        if score >= high_thresh: return "HIGH — Worth probing"
+        if score >= med_thresh:  return "MEDIUM — Investigate"
+        return "LOW — Likely clean"
+
     domain_signals: Dict[str, Any] = {}
     for domain, data in passive_results.items():
         sub_count    = len(data.get("subdomains", []))
@@ -292,10 +327,11 @@ def score_and_aggregate(
         for f in domain_findings:
             domain_score += f.score // 10
 
-        # B-06 fix: nmap port-based score boost
+        # A-02 fix: correlate nmap IPs via ip_domain_map — not substring match
         for p in nmap_interesting:
             ip = p.get("ip", "")
-            if domain in ip or any(domain in h.get("host", "") for h in live_hosts if h.get("host") == ip):
+            mapped_domains = ip_domain_map.get(ip, [])
+            if any(domain in d for d in mapped_domains):
                 domain_score += 30 if p.get("risk") == "high" else 15
 
         domain_signals[domain] = {
@@ -304,15 +340,8 @@ def score_and_aggregate(
             "findings_count":  len(domain_findings),
             "interest_score":  domain_score,
             "top_findings":    [f.to_dict() for f in domain_findings[:5]],
+            "priority":        priority_label(domain_score),
         }
-
-    def priority_label(score: int) -> str:
-        if score >= 70: return "HIGH — Worth probing"
-        if score >= 40: return "MEDIUM — Investigate"
-        return "LOW — Likely clean"
-
-    for sig in domain_signals.values():
-        sig["priority"] = priority_label(sig["interest_score"])
 
     output: Dict[str, Any] = {
         "total_findings": len(all_findings),

@@ -9,6 +9,8 @@ Fixes applied:
   B-09 (audit 2026-05-12): removed --quiet from paramspider (v2.x).
   N-06 (audit 2026-05-13): isinstance(url, str) guard in run_ffuf() loop
        prevents dicts sneaking in from callers.
+  A-01 (audit 2026-05-13): run_waybackurls + run_paramspider launched in
+       parallel via asyncio.gather() — eliminates sequential delay.
 """
 import asyncio
 import json
@@ -200,8 +202,12 @@ async def run_vuln_scan(
             "paramspider_urls": [], "secret_hits": [], "archived_url_count": 0,
         }
 
-    archived_urls   = await run_waybackurls(apex_domains, vuln_dir)
-    param_urls      = await run_paramspider(apex_domains, vuln_dir)
+    # A-01 fix: launch waybackurls and paramspider in parallel — both are
+    # independent I/O-bound tasks; sequential execution wasted minutes.
+    archived_urls, param_urls = await asyncio.gather(
+        run_waybackurls(apex_domains, vuln_dir),
+        run_paramspider(apex_domains, vuln_dir),
+    )
     all_urls_for_gf = list(set(archived_urls + param_urls + live_urls))
 
     nuclei_tags     = config.get("nuclei_tags",
