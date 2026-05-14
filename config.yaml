@@ -22,6 +22,12 @@ api_keys:
 # Max domains processed concurrently during passive phase (avoid DNS rate-limits)
 passive_concurrency: 5
 
+# crtsh rate limiting — reduce 429s on large scopes
+crtsh:
+  rate_limit: 5          # requests per second
+  rate_limit_unit: second
+  timeout: 30
+
 profiles:
   fast:
     passive: true
@@ -104,6 +110,13 @@ nuclei_tags:
   - cve
   - default-logins
   - panel
+  - argocd
+  - jenkins
+  - grafana
+  - kibana
+  - vault
+  - airflow
+  - sonarqube
 
 nmap_top_ports: 1000
 nmap_flags: "-sV -sC --open"
@@ -124,3 +137,15 @@ scoring:
   nmap_medium_risk_port: 30
   priority_high_threshold: 70
   priority_medium_threshold: 40
+  # Keyword scoring tuned down to reduce false positives
+  keyword_api_score: 10      # was 25 — api/dev keywords alone are weak signal
+  keyword_dev_score: 10
+  keyword_test_score: 10
+  keyword_staging_score: 15
+  keyword_admin_score: 30    # admin still meaningful but not HIGH alone
+  keyword_internal_score: 20
+  # Status code boosters applied on top of keyword score
+  status_200_boost: 20
+  status_403_boost: 10       # 403 = exists but blocked, worth noting
+  status_404_boost: 0        # 404 = noise, no boost
+  cloudfront_error_boost: 0  # CloudFront "request could not be satisfied" = noise
